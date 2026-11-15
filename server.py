@@ -378,6 +378,51 @@ PERMISSIONS = [
 PERMISSION_KEYS = [p['key'] for p in PERMISSIONS]
 PERMISSION_NAMES = dict((p['key'], p['name']) for p in PERMISSIONS)
 
+# ---------- 服务端权限校验（补上「12 个权限点只在前端菜单生效」的缺口） ----------
+# state 是一次性整体覆盖写入，给接口挂固定权限点会误伤只改自己模块的普通用户。
+# 因此按「本次提交中发生变化的顶层域」动态校验：只拦无对应菜单权限的那部分，
+# 未改动的字段原样带回不受影响；元数据字段（v/createdAt/rev）不参与校验。
+STATE_FIELD_PERMS = {
+    'tickets':  ('intake', 'daily-log', 'log-entry', 'tickets', 'patrol'),
+    'patrols':  ('patrol', 'daily-log'),
+    'assets':   ('assets', 'settings'),
+    'settings': ('settings', 'assets'),
+    'kb':       ('kb',),
+}
+STATE_FIELD_LABELS = {
+    'tickets': '工作日志', 'patrols': '巡视管理', 'assets': '教室/设备档案',
+    'settings': '基础配置', 'kb': '知识库',
+}
+
+
+def require_perm(*keys):
+    """要求登录用户至少具备一个指定权限点；管理员恒放行。须放在 @require_auth 之下。"""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(user, *args, **kwargs):
+            if is_admin_user(user):
+                return fn(user, *args, **kwargs)
+            if not set(effective_permissions(user)).intersection(keys):
+                return jsonify({'error': '没有权限执行该操作：需要「%s」' %
+                                PERMISSION_NAMES.get(keys[0], keys[0])}), 403
+            return fn(user, *args, **kwargs)
+        return wrapper
+    return deco
+
+
+def denied_state_fields(user, old, new, has_old=True):
+    """返回用户无权修改的顶层域中文名列表；管理员与首次写入恒为空。"""
+    if not has_old or is_admin_user(user):
+        return []
+    perms = set(effective_permissions(user))
+    denied = []
+    for field, needed in STATE_FIELD_PERMS.items():
+        if old.get(field) == new.get(field):
+            continue
+        if not perms.intersection(needed):
+            denied.append(STATE_FIELD_LABELS.get(field, field))
+    return sorted(set(denied))
+
 
 def perm_names(keys):
     """权限点转成菜单名称，避免审计日志出现英文标识。"""
@@ -640,6 +685,7 @@ def api_license_post(user):
 
 @app.route('/api/report/pdf', methods=['POST'])
 @require_auth
+@require_perm('reports')
 def api_report_pdf(user):
     data = request.get_json(force=True, silent=True) or {}
     try:
@@ -789,8 +835,22 @@ def put_state(user):
     raw = json.dumps(obj, ensure_ascii=False)
     conn = get_db()
     try:
-        row = conn.execute('SELECT rev FROM state WHERE id = 1').fetchone()
+        row = conn.execute('SELECT json, rev FROM state WHERE id = 1').fetchone()
         cur_rev = row['rev'] if row else 0
+        # 服务端权限校验：按本次实际发生变化的顶层域检查菜单权限点。
+        # 首次写入（无历史 state）放行，避免新部署初始化被卡住。
+        old_obj = {}
+        if row and row['json']:
+            try:
+                old_obj = json.loads(row['json'])
+                if not isinstance(old_obj, dict):
+                    old_obj = {}
+            except (ValueError, TypeError):
+                old_obj = {}
+        denied = denied_state_fields(user, old_obj, obj, has_old=bool(row))
+        if denied:
+            return jsonify({'error': '没有权限修改「%s」，请联系管理员开通对应菜单权限'
+                                     % '、'.join(denied), 'denied': denied}), 403
         if base_rev is not None:
             if not isinstance(base_rev, int) or base_rev < 0:
                 return jsonify({'error': '状态数据格式不正确'}), 400

@@ -1,11 +1,14 @@
 """缺少教室编号时默认 0000 导入的验证（东华日报版式）。"""
 import sys, os, re, json, time, subprocess, tempfile, urllib.request, socket
 
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
+# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
+_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
+if os.path.isdir(_PYLIBS):
+    sys.path.insert(0, _PYLIBS)
 from playwright.sync_api import sync_playwright
 import openpyxl
 
-ROOT = r'd:\pctools win10\dhu'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
 TMP = tempfile.gettempdir()
 XLSX = os.path.join(TMP, 'dhu_default_room.xlsx')
 

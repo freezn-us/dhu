@@ -1,5 +1,5 @@
 {
-    "version":  "1.5.0-beta.1",
-    "buildTime":  "2026-11-15T10:32:18+08:00",
-    "notes":  "封测版（Beta）：第一阶段成果固化，授权功能位、版权加固、报表接口修复全部纳入；用于封测验证与问题收集"
+    "version":  "1.5.1",
+    "buildTime":  "2026-11-15T19:29:59+08:00",
+    "notes":  "Server-side permission checks; semver bump fix; test path fix"
 }

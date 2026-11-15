@@ -3,12 +3,18 @@
 运行：python tests/test_march_import.py
 """
 import sys, os, re, json, time, subprocess, tempfile, urllib.request, base64
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
+# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
+_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
+if os.path.isdir(_PYLIBS):
+    sys.path.insert(0, _PYLIBS)
 
 from playwright.sync_api import sync_playwright
 
-ROOT = r'd:\pctools win10\dhu'
-MARCH_XLSX = r'c:\Users\user\.trae-cn\attachments\a4c3ec6c-7f2d-421d-8d54-8868b5c063f7_12f4fad1-30e2-466f-8c86-e77c3c4e6162_3月运维工作日志.xlsx'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
+MARCH_XLSX = os.environ.get('DHU_TEST_MARCH_XLSX') or os.path.join(ROOT, 'tests', 'fixtures', 'march-log.xlsx')
+if not os.path.isfile(MARCH_XLSX):
+    raise SystemExit('缺少 3 月日报测试样本：请设置环境变量 DHU_TEST_MARCH_XLSX 指向真实日报 .xlsx，'
+                     '或把样本放到 tests/fixtures/march-log.xlsx。当前查找路径：' + MARCH_XLSX)
 OUT_XLSX = os.path.join(ROOT, 'tests', 'output', 'export-march-format.xlsx')
 
 import socket

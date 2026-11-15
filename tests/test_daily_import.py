@@ -1,11 +1,17 @@
 """东华日报 xlsx 导入验证（Flask 后端 + SQLite 版）。"""
 import sys, os, re, json, time, subprocess, tempfile, urllib.request
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
+# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
+_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
+if os.path.isdir(_PYLIBS):
+    sys.path.insert(0, _PYLIBS)
 
 from playwright.sync_api import sync_playwright
 
-ROOT = r'd:\pctools win10\dhu'
-DAILY_XLSX = r'c:\Users\user\.trae-cn\attachments\ae23861c-d918-491f-9bb5-cc556ccd08bf_84642d41-5fa2-454f-bc84-28728970376b_9月多媒体教室每日运维工作日志.xlsx'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
+DAILY_XLSX = os.environ.get('DHU_TEST_XLSX') or os.path.join(ROOT, 'tests', 'fixtures', 'daily-log.xlsx')
+if not os.path.isfile(DAILY_XLSX):
+    raise SystemExit('缺少日报测试样本：请设置环境变量 DHU_TEST_XLSX 指向真实日报 .xlsx，'
+                     '或把样本放到 tests/fixtures/daily-log.xlsx。当前查找路径：' + DAILY_XLSX)
 
 import socket
 s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()

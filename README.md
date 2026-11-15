@@ -2,7 +2,7 @@
 
 面向东华大学松江校区多媒体教室的运维管理平台：报修受理、工作日志填报、巡视打卡、教室/设备档案、统计报表。
 
-- **当前版本**：v1.5.0-beta.1（封测版，见 [version.json](version.json)；上一版 v1.4.1）
+- **当前版本**：v1.5.1（见 [version.json](version.json)；上一版 v1.5.0-beta.1 封测版）
 - **架构**：Flask + SQLite 后端（`server.py`）+ 原生 JS 单页前端（`assets/`），PyInstaller 打包为 Windows 安装包
 - **数据规模**：253 间教室（一教 89 / 二教 92 / 四教 32 / 化工楼 18 / 中南楼 16 / 机房 6）
 - **交付形态**：单机或局域网部署，含 RSA 授权与桌面启动器，双击图标即用
@@ -74,6 +74,8 @@ python server.py
 - `user-manage`、`audit` 两页不进勾选列表，**仅管理员可见**
 - 密码 PBKDF2-HMAC-SHA256（20 万次迭代）+ salt 存 `users` 表，会话 token 存 `sessions` 表（24 小时过期，旧哈希登录时自动升级）
 - 日志改删权限：普通用户可编辑/删除**当天**任意日志，历史日期只读
+- **服务端权限校验（v1.5.1 起）**：权限点不再只控制菜单显隐。`/api/state` 按「本次提交中发生变化的顶层域」检查权限点（映射见 `STATE_FIELD_PERMS`），越权返回 **403** 并附 `denied` 列表，且不写库；管理员恒放行，首次写入（空库）放行，未改动字段原样提交不受影响。`/api/report/pdf` 需 `reports` 权限
+  > 权限点是**页面级**而非行级：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口被工作台依赖，暂未加权限校验
 
 ## 五、授权（License）
 
@@ -142,12 +144,12 @@ python tests/ui_selftest.py          # Playwright 端到端
 python tests/test_daily_import.py    # 真实日报导入校验
 ```
 
-共 15 个测试脚本。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
+共 16 个测试脚本。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
 
-> ⚠️ 以下 6 个脚本仍硬编码了失效的旧路径 `d:\pctools win10\dhu`，运行前需改为
-> `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`：
-> `test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、
-> `test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`。
+- 原硬编码旧路径 `d:\pctools win10\dhu` 的 6 个脚本（`test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、`test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`）已全部改为基于 `__file__` 动态解析；旧机器临时 `pylibs` 仅在该目录真实存在时才加入搜索路径，依赖统一由 `.build-venv` 提供。
+- 其中 3 个脚本需要真实日报 xlsx 样本：`test_daily_import.py` / `test_export_format.py` 用 `DHU_TEST_XLSX`（或 `tests/fixtures/daily-log.xlsx`），`test_march_import.py` 用 `DHU_TEST_MARCH_XLSX`（或 `tests/fixtures/march-log.xlsx`）。缺样本时会给出明确提示并退出，不再抛 FileNotFoundError。
+- `tests/test_state_rev.py`：乐观锁与统一错误响应（15 项）。
+- `tests/test_state_perm.py`：服务端权限校验回归（31 项，临时库 + 临时端口，不碰正式数据）。
 
 ## 十、文档
 
@@ -167,4 +169,5 @@ python tests/test_daily_import.py    # 真实日报导入校验
 - 导入的故障类型必须在字典内（含包含匹配）；工程师不在名单会提示但仍按文本导入
 - 报表以「来电时间」归属统计区间，跨月日志按来电月份计
 - 打印样式仅隐藏导航与操作区，未做分页优化
-- 无 git，版本回滚依赖 `backups/` 手工快照
+- 权限点为**页面级**：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口被工作台依赖，暂未加权限校验
+- 已建立 git 基线（`main` 分支，忽略规则见 `.gitignore`）；`backups/` 手工快照仍留在磁盘但不纳入版本控制。代码级回滚优先用 `git`，已安装版本的回滚仍用安装目录下「版本回滚.bat」

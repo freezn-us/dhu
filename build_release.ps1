@@ -29,10 +29,13 @@ if (Test-Path $vf) {
 if ($Version) {
     $newVersion = $Version.Trim().TrimStart('v', 'V')
 } elseif ($prev -and -not $NoBump) {
-    $parts = $prev.Split('.')
+    # 版本号可能是 1.5.0-beta.1 之类的预发布格式：先取 '-' 前的主版本，
+    # 只递增第 3 段数字，避免对 "0-beta" 这类片段做 [int] 转换而抛异常。
+    $core = ($prev -split '-')[0]
+    $parts = @($core.Split('.'))
     while ($parts.Count -lt 3) { $parts += '0' }
-    $parts[2] = [string]([int]$parts[2] + 1)
-    $newVersion = ($parts -join '.')
+    try { $patch = [int]$parts[2] + 1 } catch { $patch = 1 }
+    $newVersion = $parts[0] + '.' + $parts[1] + '.' + $patch
 } elseif ($prev) {
     $newVersion = $prev
 } else {

@@ -3,10 +3,13 @@ JS 层拦截未来日期、回到今天按钮、排班日历选中态。
 运行：python tests/test_date_clamp.py
 """
 import sys, os, json, time, subprocess, tempfile, urllib.request, socket
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
+# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
+_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
+if os.path.isdir(_PYLIBS):
+    sys.path.insert(0, _PYLIBS)
 from playwright.sync_api import sync_playwright
 
-ROOT = r'd:\pctools win10\dhu'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
 s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
 env = os.environ.copy(); env['DHU_OPS_PORT'] = str(port)
 env['DHU_OPS_DB'] = os.path.join(tempfile.gettempdir(), f'dhu_cal_{port}.db')
