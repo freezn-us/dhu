@@ -1,0 +1,66 @@
+# ============================================================
+# 东华大学多媒体教室运维系统 · Git 忽略规则
+# 原则：只纳入源码 / 文档 / 配置模板；所有可重建产物、本机状态、
+#       大体积归档都不进版本库。文件仍保留在磁盘上，不删除任何东西。
+# ============================================================
+
+# --- 本机 Python 环境与字节码 ---
+.build-venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- 构建产物（build_release.ps1 可重建）---
+dist/
+build/
+.exetest/
+*.spec.bak
+*.zip
+*.exe
+*.msi
+*.msix
+
+# --- 发布归档（1.2G，全部可重建）---
+releases/
+
+# --- 数据库与本机运行状态（每台机器不同）---
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+license.json
+license.state
+url.txt
+port.txt
+CONERR$
+*.log
+.exetest/server.err.log
+
+# --- 手工快照 / 历史分析产物（保留在磁盘，交给 git 接管）---
+backups/
+2026-11-11/
+2026-11-12/
+_ref/
+.screenshots/
+.trae-html-share-packages/
+
+# --- 测试与文档中的生成物（源码脚本仍纳入）---
+tests/node/
+tests/screenshots/
+tests/shots/
+tests/output/
+docs/_screens/
+
+# --- 编辑器 / 操作系统 ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*.tmp

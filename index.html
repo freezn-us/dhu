@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1677ff">
+<meta name="author" content="东华大学信息中心">
+<meta name="copyright" content="© 2026 东华大学信息中心 版权所有">
+<meta name="description" content="东华大学多媒体教室运维系统：局域网部署的教室运维工单、巡视与报表平台">
+<title>东华大学多媒体教室运维系统</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231677ff'/%3E%3Cpath d='M8 13l8-4 8 4-8 4-8-4z' fill='white'/%3E%3Cpath d='M11 15v5c0 1.4 2 2.5 5 2.5s5-1.1 5-2.5v-5' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">
+    <span class="mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-5 9 5-9 5-9-5z"/><path d="M6 11v5c0 1.5 2.7 3 6 3s6-1.5 6-3v-5"/></svg>
+    </span>
+    <span>多媒体教室运维系统<span class="t2">东华大学 · 松江校区</span></span>
+  </div>
+  <div class="crumb" id="crumb">概览 / <b>工作台</b></div>
+  <div class="topbar-right">
+    <span id="license-badge" style="display:none"></span>
+    <span id="app-ver" style="font-size:11px;color:#8f959e;margin-right:4px"></span>
+    <span class="save-state" id="save-state"><i></i>已同步到服务器</span>
+    <span class="login-user" id="login-user" style="display:none"><i id="login-avatar">A</i><span id="login-name-text">admin</span></span>
+    <button class="logout-btn" id="logout-btn" style="display:none" title="退出登录">退出登录</button>
+    <button class="icon-btn" id="mobile-preview" title="在 430px 宽窗口中打开手机视图">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M9 18h6"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="layout">
+  <nav class="sidebar" id="nav"></nav>
+  <main class="main" id="view"></main>
+</div>
+
+<nav class="mobile-nav" id="mobile-nav"></nav>
+
+<div class="mask" id="mask"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div class="r1"><h3 id="drawer-title">日志详情</h3><button class="close" onclick="UI.closeDrawer()">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button></div>
+    <div class="tags" id="drawer-tags"></div>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+  <div class="drawer-foot" id="drawer-foot"></div>
+</aside>
+
+<div class="modal-mask" id="modal-mask">
+  <div class="modal" id="modal">
+    <div class="modal-head"><h3 id="modal-title">提示</h3><button class="close" onclick="UI.closeModal()">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="login-screen" id="login-screen" style="display:none">
+  <div class="login-box">
+    <div class="login-logo">
+      <span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-5 9 5-9 5-9-5z"/><path d="M6 11v5c0 1.5 2.7 3 6 3s6-1.5 6-3v-5"/></svg></span>
+      <h2>多媒体教室运维系统</h2>
+    </div>
+    <div class="login-sub">东华大学 · 松江校区 · 请登录后使用</div>
+    <div class="field"><label>用户名</label><input class="input" id="login-name" autocomplete="username" placeholder="请输入用户名"></div>
+    <div class="field"><label>密码</label><input class="input" id="login-pwd" type="password" autocomplete="current-password" placeholder="请输入密码"></div>
+    <button class="login-btn" id="login-btn">登 录</button>
+    <div class="login-err" id="login-err"></div>
+    <div class="login-copy">© 2026 东华大学信息中心 版权所有<br>本系统受著作权法保护，未经书面许可不得复制、传播或用于其他项目</div>
+  </div>
+</div>
+
+<noscript><div style="padding:40px;text-align:center;font-size:14px">本系统需要启用 JavaScript 才能运行。</div></noscript>
+
+<script>
+/* 老内核拦截：IE 及 360/QQ 浏览器的「兼容模式（IE 内核）」不支持本系统，给出明确提示 */
+(function () {
+  var tooOld = !!document.documentMode || !window.fetch || !window.Promise || !window.addEventListener;
+  if (!tooOld) return;
+  var html = '<div style="max-width:620px;margin:12vh auto;padding:28px 30px;font-size:14px;line-height:1.9;color:#1f2329;border:1px solid #e5e6eb;border-radius:8px;font-family:Microsoft YaHei,sans-serif">' +
+    '<div style="font-size:18px;font-weight:600;margin-bottom:12px">当前浏览器内核版本过低，无法打开本系统</div>' +
+    '<div style="color:#646a73">本系统需要现代浏览器（Chromium 80+ / Firefox 74+）。请按下面任一种方式处理：</div>' +
+    '<div style="margin-top:10px"><b>360 浏览器</b>：点击地址栏右侧的「闪电」图标，切换到<b>极速模式</b>后刷新</div>' +
+    '<div><b>QQ 浏览器</b>：点击地址栏右侧的「闪电」图标，切换到<b>极速模式</b>后刷新</div>' +
+    '<div><b>IE 浏览器</b>：请改用 <b>Chrome</b>、<b>Edge</b> 或 <b>Firefox</b> 打开</div>' +
+    '<div style="margin-top:14px;color:#8f959e;font-size:12.5px">推荐地址：' + location.origin + '</div>' +
+    '</div>';
+  document.addEventListener('DOMContentLoaded', function () { document.body.innerHTML = html; });
+})();
+</script>
+
+<!-- 重型第三方库（xlsx / jspdf / html2canvas）改为首次使用时按需加载，见 assets/ui.js -->
+<script src="assets/seed-rooms.js"></script>
+<script src="assets/version.js"></script>
+<script src="assets/store.js"></script>
+<script src="assets/ui.js"></script>
+<script src="assets/views-dashboard.js"></script>
+<script src="assets/views-intake.js"></script>
+<script src="assets/views-tickets.js"></script>
+<script src="assets/views-daily-log.js"></script>
+<script src="assets/views-log-entry.js"></script>
+<script src="assets/views-patrol.js"></script>
+<script src="assets/views-reports.js"></script>
+<script src="assets/views-data.js"></script>
+<script src="assets/views-settings.js"></script>
+<script src="assets/views-user-manage.js"></script>
+<script src="assets/views-audit.js"></script>
+<script src="assets/views-help.js"></script>
+<script src="assets/views-assets.js"></script>
+<script src="assets/views-kb.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
