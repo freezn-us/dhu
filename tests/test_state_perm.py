@@ -9,6 +9,7 @@
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,9 +36,10 @@ def free_port():
 
 
 PORT = free_port()
-DB = os.path.join(tempfile.gettempdir(), 'dhu_permtest_%d.db' % PORT)
-if os.path.exists(DB):
-    os.remove(DB)
+# 每个测试用独立临时目录：DB 与试用授权都落在该目录，避免 %TEMP% 下旧授权
+# 因机器码变化失效，把测试带进「只读宽限」状态。
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_permtest_')
+DB = os.path.join(TMP_DIR, 'dhu_ops.db')
 
 
 def req(path, token=None, data=None, method=None, raw_body=None):
@@ -67,14 +69,16 @@ BASE_STATE = {
     'assets': [{'id': 'a1', 'name': '投影仪'}],
     'kb': [{'id': 'k1', 'title': '开机无信号'}],
     'settings': {'engineers': [{'name': '张工'}, {'name': '李工'},
-                               {'name': '王工'}, {'name': '赵工'}], 'rooms': []},
+                               {'name': '王工'}, {'name': '赵工'},
+                               {'name': '钱工'}], 'rooms': []},
 }
 
 env = os.environ.copy()
 env['DHU_OPS_PORT'] = str(PORT)
 env['DHU_OPS_DB'] = DB
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
 env['DHU_OPS_HOST'] = '127.0.0.1'
-log = open(os.path.join(tempfile.gettempdir(), 'dhu_permtest_%d.log' % PORT), 'ab', buffering=0)
+log = open(os.path.join(TMP_DIR, 'server.log'), 'ab', buffering=0)
 proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')],
                         cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 
@@ -105,16 +109,17 @@ try:
     users = [('viewer', '张工', ['reports']),
              ('writer', '李工', ['daily-log']),
              ('keeper', '王工', ['settings']),
+             ('kbp', '钱工', ['kb']),
              ('nobody', '赵工', [])]
     tokens = {}
     for name, display, perms in users:
         code, d = req('/api/users', token=admin, method='POST',
-                      data={'name': name, 'pwd': 'Test@1234', 'display_name': display, 'role': '工程师'})
+                      data={'name': name, 'pwd': 'Test@12345', 'display_name': display, 'role': '工程师'})
         check('创建用户 ' + name, code == 200 and d.get('ok') is True, d)
         code, d = req('/api/users/%s/permissions' % name, token=admin, method='PUT',
                       data={'permissions': perms})
         check('设置权限 ' + name, code == 200, d)
-        code, d = req('/api/login', data={'name': name, 'pwd': 'Test@1234'})
+        code, d = req('/api/login', data={'name': name, 'pwd': 'Test@12345'})
         check('登录 ' + name, code == 200 and bool(d.get('token')), code)
         tokens[name] = d.get('token', '')
 
@@ -197,6 +202,50 @@ try:
     code, d = req('/api/report/pdf', token=admin, method='POST', data={})
     check('管理员调用 PDF 不被权限拦截', code != 403, code)
 
+    # --- 六个报表 JSON 接口统一要求 reports 权限 ---
+    for path in ['/api/report/summary', '/api/report/trend', '/api/report/patrol',
+                 '/api/report/device/summary', '/api/report/device/warranty']:
+        code, _ = req(path, token=tokens['viewer'])
+        check('reports 权限可读 ' + path, code == 200, code)
+        code, _ = req(path, token=tokens['writer'])
+        check('daily-log 用户读 ' + path + ' 被 403', code == 403, code)
+    # compare 需要 from/to，单独带参数验证（无参数时 400 属正常参数校验，不是权限问题）
+    code, _ = req('/api/report/compare?from=2026-11-01&to=2026-11-30', token=tokens['viewer'])
+    check('reports 权限可读 /api/report/compare', code == 200, code)
+    code, _ = req('/api/report/compare?from=2026-11-01&to=2026-11-30', token=tokens['writer'])
+    check('daily-log 用户读 /api/report/compare 被 403', code == 403, code)
+
+    # --- CSV 导出权限与结构校验 ---
+    code, d = req('/api/export/csv', token=tokens['writer'], method='POST',
+                  data={'filename': 'x.csv', 'rows': [['a']]})
+    check('无导出权限用户调用 CSV 被 403', code == 403, code)
+    code, d = req('/api/export/csv', token=admin, method='POST',
+                  data={'filename': 'x.csv', 'rows': [['a', 'b']]})
+    check('管理员 CSV 导出可用', code == 200, code)
+    code, d = req('/api/export/csv', token=admin, method='POST',
+                  data={'filename': 'x.csv', 'rows': 'bad'})
+    check('CSV rows 非数组被 400', code == 400, code)
+
+    # --- 审计写入按类别受权限约束 ---
+    code, d = req('/api/audit', token=tokens['writer'], method='POST',
+                  data={'category': '配置', 'action': '伪造配置变更'})
+    check('daily-log 用户伪造配置审计被 403', code == 403, code)
+    code, d = req('/api/audit', token=tokens['writer'], method='POST',
+                  data={'category': '日志', 'action': '修改日志'})
+    check('业务权限内写审计放行', code == 200, code)
+    code, d = req('/api/audit', token=tokens['nobody'], method='POST',
+                  data={'category': '页面', 'action': '访问页面'})
+    check('页面审计所有登录用户可写', code == 200, code)
+    code, d = req('/api/audit', token=tokens['nobody'], method='POST',
+                  data={'category': '用户', 'action': '删除用户'})
+    check('普通用户伪造用户审计被 403', code == 403, code)
+    code, d = req('/api/audit', token=tokens['kbp'], method='POST',
+                  data={'category': '知识库', 'action': '沉淀知识库'})
+    check('kb 权限可写知识库审计（类别在白名单内）', code == 200, code)
+    code, d = req('/api/audit', token=tokens['writer'], method='POST',
+                  data={'category': '知识库', 'action': '伪造知识库审计'})
+    check('daily-log 用户伪造知识库审计被 403', code == 403, code)
+
 finally:
     proc.terminate()
     try:
@@ -204,10 +253,7 @@ finally:
     except Exception:
         proc.kill()
     log.close()
-    try:
-        os.remove(DB)
-    except Exception:
-        pass
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
 
 print('----')
 print('%d/%d 通过' % (sum(results), len(results)))

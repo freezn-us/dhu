@@ -3,17 +3,15 @@
 运行：python tests/test_topbar_cal.py
 """
 import sys, os, json, time, subprocess, tempfile, urllib.request, socket
-# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
-_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
-if os.path.isdir(_PYLIBS):
-    sys.path.insert(0, _PYLIBS)
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
 s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_tb_')
 env = os.environ.copy(); env['DHU_OPS_PORT'] = str(port)
-env['DHU_OPS_DB'] = os.path.join(tempfile.gettempdir(), f'dhu_tb_{port}.db')
-log = open(os.path.join(tempfile.gettempdir(), f'dhu_tb_{port}.log'), 'ab', buffering=0)
+env['DHU_OPS_DB'] = os.path.join(TMP_DIR, 'dhu_ops.db')
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
+log = open(os.path.join(TMP_DIR, 'server.log'), 'ab', buffering=0)
 srv = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')], cwd=ROOT, env=env,
                        stdout=log, stderr=subprocess.STDOUT)
 for _ in range(50):

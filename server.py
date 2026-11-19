@@ -46,10 +46,44 @@ def _read_port_file():
         return None
 
 
+def _read_access_file():
+    """读取安装器写入的访问范围：lan=允许局域网，local=仅本机；文件缺失返回 None。
+
+    该文件由安装程序写入程序目录（打包运行时即 exe 所在目录），服务启动时读取，
+    避免「安装时选了仅本机，服务却仍监听 0.0.0.0」的不一致。
+    """
+    try:
+        with open(os.path.join(CONFIG_DIR, 'access.txt'), 'r', encoding='utf-8-sig') as f:
+            v = f.read().strip().lower()
+        if v in ('lan', '1', 'true', 'yes', 'on'):
+            return 'lan'
+        if v in ('local', '0', 'false', 'no', 'off'):
+            return 'local'
+    except Exception:
+        pass
+    return None
+
+
+def _default_host():
+    """监听地址优先级：DHU_OPS_HOST > access.txt > 升级兼容 > 新装仅本机。
+
+    - 有 access.txt：按安装时的选择；
+    - 无 access.txt 且数据库已存在：视为旧部署升级，保持原来的 0.0.0.0 行为，
+      避免升级后同事突然无法访问；
+    - 无 access.txt 且是全新安装：默认 127.0.0.1，只有本机可访问。
+    """
+    mode = _read_access_file()
+    if mode == 'lan':
+        return '0.0.0.0'
+    if mode == 'local':
+        return '127.0.0.1'
+    return '0.0.0.0' if os.path.exists(DB) else '127.0.0.1'
+
+
 # 端口优先级：DHU_OPS_PORT > IIS HttpPlatformHandler 注入的 HTTP_PLATFORM_PORT > port.txt > 8420
 PORT = int(os.environ.get('DHU_OPS_PORT') or os.environ.get('HTTP_PLATFORM_PORT') or _read_port_file() or '8420')
-# 监听地址默认 0.0.0.0（局域网内其他机器可访问）；如需仅本机可改 DHU_OPS_HOST=127.0.0.1
-HOST = os.environ.get('DHU_OPS_HOST') or '0.0.0.0'
+# 监听地址默认仅本机；安装时勾选「允许局域网访问」后由 access.txt 切换为 0.0.0.0
+HOST = os.environ.get('DHU_OPS_HOST') or _default_host()
 
 
 def _read_version():
@@ -126,6 +160,56 @@ def get_db():
     return conn
 
 
+# ---------- 初始口令与密码策略 ----------
+INITIAL_PWD_FILENAME = '初始管理员密码.txt'
+PWD_MIN_LEN = 10
+PWD_MAX_LEN = 64
+
+
+def generate_initial_password():
+    """生成 12 位随机初始密码（排除 0/O、1/I/l 等易混淆字符）。"""
+    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+    return ''.join(secrets.choice(alphabet) for _ in range(12))
+
+
+def validate_password(pwd, name):
+    """校验密码策略，返回错误文案；空字符串表示通过。"""
+    pwd = pwd or ''
+    if len(pwd) < PWD_MIN_LEN:
+        return '密码至少 %d 位' % PWD_MIN_LEN
+    if len(pwd) > PWD_MAX_LEN:
+        return '密码不能超过 %d 位' % PWD_MAX_LEN
+    if pwd.lower() == str(name or '').lower():
+        return '密码不能与登录名相同'
+    if pwd.strip() != pwd:
+        return '密码首尾不能包含空格'
+    return ''
+
+
+def _initial_pwd_path():
+    return os.path.join(os.path.dirname(DB), INITIAL_PWD_FILENAME)
+
+
+def _write_initial_password(pwd):
+    """把首次登录用的初始密码写入数据目录的一次性文件（修改密码后删除）。"""
+    path = _initial_pwd_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = ('东华大学多媒体教室运维系统 · 初始管理员密码\r\n'
+            '用户名：admin\r\n'
+            '初始密码：%s\r\n'
+            '首次登录后必须修改密码；修改成功后本文件会自动删除。\r\n' % pwd)
+    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+        f.write(text)
+    return path
+
+
+def _remove_initial_pwd_file():
+    try:
+        os.remove(_initial_pwd_path())
+    except OSError:
+        pass
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     conn = get_db()
@@ -185,16 +269,31 @@ def init_db():
         c.execute('ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1')
     if 'display_name' not in cols:
         c.execute('ALTER TABLE users ADD COLUMN display_name TEXT')
+    # 升级：首次登录强制改密标记（老用户默认 0，不强制全站改密）
+    if 'must_change_pwd' not in cols:
+        c.execute('ALTER TABLE users ADD COLUMN must_change_pwd INTEGER NOT NULL DEFAULT 0')
     # 升级：state 表增加 rev 列（乐观锁版本号，防多端并发保存互相覆盖）
     state_cols = [r[1] for r in c.execute('PRAGMA table_info(state)').fetchall()]
     if 'rev' not in state_cols:
         c.execute('ALTER TABLE state ADD COLUMN rev INTEGER NOT NULL DEFAULT 0')
     if not c.execute('SELECT COUNT(*) FROM users').fetchone()[0]:
-        # 首次启动初始化管理员账号 admin / admin123（哈希存储，不落明文）
+        # 首次启动初始化管理员账号：随机初始密码写入一次性文件，首次登录必须修改。
+        # DHU_OPS_INITIAL_ADMIN_PWD 用于自动化测试/离线引导：明确指定已知初始口令时
+        # 视为已完成口令交付，不再强制改密；正常安装始终走随机口令 + 强制改密。
+        env_pwd = os.environ.get('DHU_OPS_INITIAL_ADMIN_PWD')
+        initial_pwd = env_pwd or generate_initial_password()
         salt = secrets.token_hex(16)
-        c.execute('INSERT INTO users (name, pwd_hash, salt, role, is_admin, active, display_name) '
-                  'VALUES (?,?,?,?,1,1,?)',
-                  ('admin', hash_pwd(salt, 'admin123'), salt, '管理员', '管理员'))
+        c.execute('INSERT INTO users (name, pwd_hash, salt, role, is_admin, active, display_name, must_change_pwd) '
+                  'VALUES (?,?,?,?,1,1,?,?)',
+                  ('admin', hash_pwd(salt, initial_pwd), salt, '管理员', '管理员', 0 if env_pwd else 1))
+        conn.commit()
+        if not env_pwd:
+            try:
+                pwd_file = _write_initial_password(initial_pwd)
+                if not getattr(sys, 'frozen', False):
+                    print('[init] 初始管理员密码已写入：%s' % pwd_file)
+            except Exception as e:
+                sys.stderr.write('[init] 初始密码文件写入失败：%s\n' % e)
     else:
         # 老系统管理员升级：内置 admin 账号固定为超级管理员
         c.execute("UPDATE users SET is_admin=1 WHERE name='admin'")
@@ -326,7 +425,7 @@ def mart_sync(conn, state_obj):
                 rows)
     # 记录 mart 最后一次同步时间，便于诊断
     c.execute('INSERT OR REPLACE INTO state_meta VALUES (?,?,?)', ('mart_synced_at', now, now))
-    conn.commit()
+    # 事务由调用方统一提交：state JSON 与 mart 表必须同成同败
 
 
 def mart_backfill():
@@ -351,6 +450,7 @@ def mart_backfill():
         s_d = len((obj.get('assets') or {}).get('devices', []) or []) if isinstance(obj, dict) else 0
         if (s_t > 0 and t_count == 0) or (s_p > 0 and p_count == 0) or (s_d > 0 and d_count == 0):
             mart_sync(conn, obj)
+            conn.commit()
             conn.close()
             return True
         conn.close()
@@ -563,11 +663,16 @@ def bearer_token():
 
 
 def auth_user():
+    """返回当前会话行（name/expires_at/must_change_pwd），无效或过期返回 None。"""
     token = bearer_token()
     if not token:
         return None
     conn = get_db()
-    row = conn.execute('SELECT name, expires_at FROM sessions WHERE token = ?', (token,)).fetchone()
+    row = conn.execute(
+        'SELECT s.name AS name, s.expires_at AS expires_at, '
+        'COALESCE(u.must_change_pwd, 0) AS must_change_pwd '
+        'FROM sessions s LEFT JOIN users u ON u.name = s.name WHERE s.token = ?',
+        (token,)).fetchone()
     if not row:
         conn.close()
         return None
@@ -582,16 +687,35 @@ def auth_user():
         conn.close()
         return None
     conn.close()
-    return row['name']
+    return row
+
+
+# 首次登录未改密时仍放行的接口：查身份、改密、退出；其余业务接口一律 403
+MUST_CHANGE_ALLOWED = ('/api/login', '/api/logout', '/api/me', '/api/change-password',
+                       '/api/health', '/api/license')
+
+
+def _must_change_block(row):
+    """强制改密中间件：返回 403 响应或 None。"""
+    try:
+        if int(row['must_change_pwd'] or 0) and request.path not in MUST_CHANGE_ALLOWED:
+            return jsonify({'error': '首次登录需先修改初始密码',
+                            'code': 'must_change_password'}), 403
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None
 
 
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        user = auth_user()
-        if not user:
+        row = auth_user()
+        if not row:
             abort(401)
-        return fn(user, *args, **kwargs)
+        blocked = _must_change_block(row)
+        if blocked is not None:
+            return blocked
+        return fn(row['name'], *args, **kwargs)
     return wrapper
 
 
@@ -734,7 +858,8 @@ def login():
         audit_write(name or '匿名', '登录', '登录失败', name, '尝试过于频繁，已临时锁定')
         return jsonify({'error': '尝试次数过多，请在 %d 秒后重试' % left}), 429
     conn = get_db()
-    row = conn.execute('SELECT pwd_hash, salt, role, is_admin, active, display_name FROM users WHERE name = ?', (name,)).fetchone()
+    row = conn.execute('SELECT pwd_hash, salt, role, is_admin, active, display_name, must_change_pwd '
+                       'FROM users WHERE name = ?', (name,)).fetchone()
     ok, legacy = verify_pwd(row['salt'], pwd, row['pwd_hash']) if row else (False, False)
     if not row or not ok:
         conn.close()
@@ -763,6 +888,7 @@ def login():
     return jsonify({'token': token, 'name': name, 'role': row['role'],
                     'display_name': row['display_name'] or name,
                     'is_admin': bool(row['is_admin']),
+                    'must_change_pwd': bool(row['must_change_pwd']),
                     'permissions': effective_permissions(name)})
 
 
@@ -790,12 +916,54 @@ def health():
 @require_auth
 def me(user):
     conn = get_db()
-    row = conn.execute('SELECT role, is_admin, display_name FROM users WHERE name = ?', (user,)).fetchone()
+    row = conn.execute('SELECT role, is_admin, display_name, must_change_pwd '
+                       'FROM users WHERE name = ?', (user,)).fetchone()
     conn.close()
     return jsonify({'name': user, 'role': row['role'] if row else '',
                     'display_name': (row['display_name'] or user) if row else user,
                     'is_admin': bool(row and row['is_admin']),
+                    'must_change_pwd': bool(row and row['must_change_pwd']),
                     'permissions': effective_permissions(user)})
+
+
+@app.route('/api/change-password', methods=['POST'])
+@require_auth
+def change_password(user):
+    """首次登录/主动修改密码：校验原密码与新密码策略，成功后清除强制改密标记。"""
+    data = request.get_json(force=True, silent=True) or {}
+    old_pwd = str(data.get('old_pwd', ''))
+    new_pwd = str(data.get('new_pwd', ''))
+    confirm = str(data.get('confirm_pwd', ''))
+    conn = get_db()
+    row = conn.execute('SELECT pwd_hash, salt FROM users WHERE name = ?', (user,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': '账号不存在'}), 404
+    ok, _legacy = verify_pwd(row['salt'], old_pwd, row['pwd_hash'])
+    if not ok:
+        conn.close()
+        return jsonify({'error': '原密码不正确'}), 400
+    if confirm and new_pwd != confirm:
+        conn.close()
+        return jsonify({'error': '两次输入的新密码不一致'}), 400
+    err = validate_password(new_pwd, user)
+    if err:
+        conn.close()
+        return jsonify({'error': err}), 400
+    if verify_pwd(row['salt'], new_pwd, row['pwd_hash'])[0]:
+        conn.close()
+        return jsonify({'error': '新密码不能与原密码相同'}), 400
+    salt = secrets.token_hex(16)
+    conn.execute('UPDATE users SET salt=?, pwd_hash=?, must_change_pwd=0 WHERE name=?',
+                 (salt, hash_pwd(salt, new_pwd), user))
+    # 改密后踢掉该账号的其他会话，只保留当前这一个
+    current = bearer_token()
+    conn.execute('DELETE FROM sessions WHERE name=? AND token<>?', (user, current or ''))
+    conn.commit()
+    conn.close()
+    _remove_initial_pwd_file()
+    audit_write(user, '登录', '修改密码', user, '密码已更新，强制改密标记已清除')
+    return jsonify({'ok': True})
 
 
 @app.route('/api/state', methods=['GET'])
@@ -870,16 +1038,16 @@ def put_state(user):
                      'ON CONFLICT(id) DO UPDATE SET json = excluded.json, '
                      'updated_at = excluded.updated_at, rev = excluded.rev',
                      (raw, time.strftime('%Y-%m-%dT%H:%M:%S'), new_rev))
-        # 同步到数据仓库 mart 表（幂等、全量覆盖，保证数据一致）
+        # state JSON 与 mart 表在同一事务中提交：任一步失败就整体回滚，
+        # 不能出现「接口返回成功、数据实际没保存」的静默丢数据。
         try:
             mart_sync(conn, obj)
+            conn.commit()
         except Exception as e:
-            # mart 同步失败不影响主写入，记录日志即可
+            conn.rollback()
             import sys as _sys
             print('mart_sync fail:', e, file=_sys.stderr)
-            conn.rollback()
-            conn.commit()  # 确保 state 表写入仍然生效
-        conn.commit()
+            return jsonify({'error': '保存失败：数据仓库同步未完成，本次修改未生效，请重试'}), 500
     finally:
         conn.close()
     return jsonify({'ok': True, 'rev': new_rev})
@@ -888,15 +1056,20 @@ def put_state(user):
 # ---------- CSV 导出（服务端按 GB18030 生成，Excel 双击打开不乱码） ----------
 @app.route('/api/export/csv', methods=['POST'])
 @require_auth
+@require_perm('data', 'tickets', 'reports')
 def export_csv(user):
     data = request.get_json(force=True, silent=True) or {}
     rows = data.get('rows')
     if not isinstance(rows, list):
         return jsonify({'error': '导出数据格式不正确'}), 400
+    if len(rows) > 20000:
+        return jsonify({'error': '导出数据过大，请缩小时间范围后重试'}), 400
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator='\r\n')
     for row in rows:
-        writer.writerow(['' if c is None else str(c) for c in (row or [])])
+        if not isinstance(row, (list, tuple)):
+            return jsonify({'error': '导出数据格式不正确'}), 400
+        writer.writerow(['' if c is None else str(c)[:10000] for c in row])
     body = buf.getvalue().encode('gb18030', errors='replace')
     filename = str(data.get('filename') or 'export.csv')
     resp = Response(body, mimetype='text/csv')
@@ -908,9 +1081,13 @@ def export_csv(user):
 def require_admin(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        user = auth_user()
-        if not user:
+        row = auth_user()
+        if not row:
             abort(401)
+        blocked = _must_change_block(row)
+        if blocked is not None:
+            return blocked
+        user = row['name']
         if not is_admin_user(user):
             return jsonify({'error': '仅管理员可执行此操作'}), 403
         return fn(user, *args, **kwargs)
@@ -925,7 +1102,20 @@ SQLITE_MAGIC = b'SQLite format 3\x00'
 
 # ---------- 审计日志 ----------
 MAX_AUDIT_ROWS = 200000   # 超过后自动清理最旧的记录，避免数据库无限增长
-AUDIT_CATEGORIES = ['登录', '页面', '日志', '工单', '巡视', '配置', '数据', '用户', '系统']
+# 客户端只能写入其业务权限范围内的审计类别；用户/系统/登录类仅管理员可写（登录日志由服务端产生）
+AUDIT_CATEGORY_PERMS = {
+    '页面': (),
+    '登录': None,
+    '日志': ('intake', 'daily-log', 'log-entry', 'tickets', 'patrol'),
+    '工单': ('intake', 'daily-log', 'tickets', 'patrol'),
+    '巡视': ('patrol', 'daily-log'),
+    '配置': ('settings', 'assets'),
+    '数据': ('data',),
+    '知识库': ('kb',),
+    '用户': None,
+    '系统': None,
+}
+AUDIT_CATEGORIES = ['登录', '页面', '日志', '工单', '巡视', '配置', '数据', '知识库', '用户', '系统']
 
 
 def _audit_ip():
@@ -1139,8 +1329,11 @@ def create_user(_admin):
         return jsonify({'error': '登录名和密码不能为空'}), 400
     if not valid_login_name(name):
         return jsonify({'error': '登录名只能使用英文、数字、点、下划线或短横（不超过32字符）'}), 400
-    if len(pwd) > 64 or len(display_name) > 32:
-        return jsonify({'error': '密码或用户名过长'}), 400
+    if len(display_name) > 32:
+        return jsonify({'error': '用户名过长'}), 400
+    err = validate_password(pwd, name)
+    if err:
+        return jsonify({'error': err}), 400
     # 用户名必须取自「基础配置 · 工程师名单」，账号数量与工程师一一对应
     if display_name not in _engineer_names():
         return jsonify({'error': '用户名必须是「基础配置 · 工程师名单」中的姓名，请先添加该工程师'}), 400
@@ -1194,9 +1387,16 @@ def update_user(_admin, name):
         conn.close()
         return jsonify({'error': '系统只允许一个超级管理员（内置 admin），其他账号不能设置管理员标记'}), 400
     if data.get('pwd'):
+        new_pwd = str(data['pwd'])
+        err = validate_password(new_pwd, name)
+        if err:
+            conn.close()
+            return jsonify({'error': err}), 400
         salt = secrets.token_hex(16)
         fields.append('salt=?'); values.append(salt)
-        fields.append('pwd_hash=?'); values.append(hash_pwd(salt, str(data['pwd'])))
+        fields.append('pwd_hash=?'); values.append(hash_pwd(salt, new_pwd))
+        # 管理员重置他人密码：下次登录强制改密；重置自己则保持当前会话不被踢
+        fields.append('must_change_pwd=?'); values.append(0 if name == _admin else 1)
     # 禁止把自己降级为非管理员，避免把自己锁在门外
     if name == _admin and 'is_admin' in data and not data['is_admin']:
         conn.close()
@@ -1204,6 +1404,12 @@ def update_user(_admin, name):
     if fields:
         values.append(name)
         conn.execute('UPDATE users SET ' + ','.join(fields) + ' WHERE name=?', values)
+        if data.get('pwd'):
+            # 密码被重置后旧会话立即失效（重置自己时保留当前会话）
+            if name == _admin:
+                conn.execute('DELETE FROM sessions WHERE name=? AND token<>?', (name, bearer_token() or ''))
+            else:
+                conn.execute('DELETE FROM sessions WHERE name=?', (name,))
         conn.commit()
     conn.close()
     changes = []
@@ -1415,10 +1621,18 @@ def post_audit(user):
     category = str(data.get('category') or '系统')
     if category not in AUDIT_CATEGORIES:
         category = '系统'
-    action = str(data.get('action') or '').strip()
+    # 审计写入也必须受权限约束，否则任意登录用户都能伪造“删除用户”等记录
+    if not is_admin_user(user):
+        allowed = AUDIT_CATEGORY_PERMS.get(category)
+        # None=仅管理员；空元组=所有登录用户可写（页面访问）
+        if allowed is None or (allowed and not set(effective_permissions(user)).intersection(allowed)):
+            return jsonify({'error': '没有权限写入该类审计日志'}), 403
+    action = str(data.get('action') or '').strip()[:100]
     if not action:
         return jsonify({'error': '缺少操作名称'}), 400
-    audit_write(user, category, action, data.get('target'), data.get('detail'))
+    target = str(data.get('target') or '')[:500]
+    detail = str(data.get('detail') or '')[:2000]
+    audit_write(user, category, action, target, detail)
     return jsonify({'ok': True})
 
 
@@ -1639,6 +1853,7 @@ def _ticket_base_where(from_date, to_date, stage):
 
 @app.route('/api/report/summary')
 @require_auth
+@require_perm('reports')
 def report_summary(_user):
     """核心汇总：总量、状态分布、故障 TOP、楼栋、工程师工作量、时效指标。"""
     from_date = str(request.args.get('from') or '').strip()
@@ -1747,6 +1962,7 @@ def report_summary(_user):
 
 @app.route('/api/report/trend')
 @require_auth
+@require_perm('reports')
 def report_trend(_user):
     """逐日 / 逐周 / 逐月工单量。"""
     from_date = str(request.args.get('from') or '').strip()
@@ -1777,6 +1993,7 @@ def report_trend(_user):
 
 @app.route('/api/report/patrol')
 @require_auth
+@require_perm('reports')
 def report_patrol(_user):
     """巡视统计：完成率、异常 TOP、参与人、异常 vs 工单关联。"""
     from_date = str(request.args.get('from') or '').strip()
@@ -1816,10 +2033,11 @@ def report_patrol(_user):
         'ORDER BY date DESC LIMIT 50', params).fetchall()
 
     # 关联工单数：巡视记录有异常字段、或有 repair_no 的
+    # 注意：OR 条件必须整体加括号，否则会绕过前面的日期/楼栋过滤
     linked = conn.execute(
         'SELECT COUNT(*) FROM patrols_mart' + clause +
-        ' AND (abnormal IS NOT NULL AND abnormal != "") OR (log_no IS NOT NULL AND log_no != "") '
-        '   OR (repair_no IS NOT NULL AND repair_no != "")', params).fetchone()[0]
+        ' AND ((abnormal IS NOT NULL AND abnormal != "") OR (log_no IS NOT NULL AND log_no != "") '
+        '   OR (repair_no IS NOT NULL AND repair_no != ""))', params).fetchone()[0]
 
     conn.close()
     done = by_status.get('done', 0)
@@ -1838,6 +2056,7 @@ def report_patrol(_user):
 
 @app.route('/api/report/device/summary')
 @require_auth
+@require_perm('reports')
 def report_device_summary(_user):
     """设备台账概览：状态分布、保修预警、按类别。"""
     conn = get_db()
@@ -1885,6 +2104,7 @@ def report_device_summary(_user):
 
 @app.route('/api/report/device/warranty')
 @require_auth
+@require_perm('reports')
 def report_device_warranty(_user):
     """保修预警列表（按到期时间升序）。"""
     limit = int(request.args.get('limit') or 50)
@@ -1904,6 +2124,7 @@ def report_device_warranty(_user):
 
 @app.route('/api/report/compare')
 @require_auth
+@require_perm('reports')
 def report_compare(_user):
     """两个时间段的关键指标对比。from/to 为主区间，from2/to2 为对比区间（可选）。"""
     from1 = str(request.args.get('from') or '').strip()
@@ -2039,11 +2260,29 @@ if __name__ == '__main__':
         if sys.stderr is None:
             sys.stderr = open(os.devnull, 'w')
     init_db()
+    # 离线兜底：忘记管理员密码时在服务器上执行 `server.exe --reset-admin`，
+    # 生成新的随机初始密码并写回数据目录的一次性文件，不依赖任何在线服务。
+    if '--reset-admin' in sys.argv:
+        new_pwd = os.environ.get('DHU_OPS_INITIAL_ADMIN_PWD') or generate_initial_password()
+        salt = secrets.token_hex(16)
+        conn = get_db()
+        conn.execute("UPDATE users SET pwd_hash=?, salt=?, must_change_pwd=1, active=1 WHERE name='admin'",
+                     (hash_pwd(salt, new_pwd), salt))
+        conn.execute("DELETE FROM sessions WHERE name='admin'")
+        conn.commit()
+        conn.close()
+        path = _write_initial_password(new_pwd)
+        print('[reset-admin] 管理员密码已重置，新初始密码：%s' % path)
+        sys.exit(0)
     # 启动时把 state JSON blob 里的存量数据回填到 mart 表（幂等）
     backfilled = mart_backfill()
     if backfilled:
         print('[mart] 已从 state JSON 回填数据仓库表')
     print('东华大学多媒体教室运维系统 · 监听 %s:%d' % (HOST, PORT))
     print('本机访问：http://127.0.0.1:%d' % PORT)
+    if HOST == '0.0.0.0':
+        print('局域网访问：已开启（安装时勾选或 access.txt=lan）')
+    else:
+        print('局域网访问：未开启；如需同事访问，请在安装时勾选「允许局域网访问」')
     print('数据库：%s' % DB)
     app.run(host=HOST, port=PORT, threaded=True)

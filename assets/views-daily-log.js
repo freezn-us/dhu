@@ -988,6 +988,10 @@
   // ---------- 表头操作 ----------
   function setDate(d) {
     if (!d) return;
+    if (d > S.fmtDate(S.nowLocal())) {
+      U.toast('不能选择未来日期', 'err');
+      return;
+    }
     curDate = d;
     pendPage = 1;
     followPage = 1;

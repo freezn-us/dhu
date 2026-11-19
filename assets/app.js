@@ -168,9 +168,13 @@
     if (Store.isStorageOK()) {
       el.className = 'save-state';
       el.innerHTML = '<i></i>已同步到服务器';
+      el.title = '';
+      el.style.cursor = '';
     } else {
       el.className = 'save-state warn';
-      el.innerHTML = '<i></i>服务器保存失败';
+      el.innerHTML = '<i></i>保存失败，点击重试';
+      el.title = Store.lastError() || '服务器保存失败';
+      el.style.cursor = 'pointer';
     }
   }
 
@@ -185,6 +189,17 @@
 
   function bind() {
     document.getElementById('mobile-preview').addEventListener('click', mobilePreview);
+    var saveEl = document.getElementById('save-state');
+    if (saveEl) {
+      saveEl.addEventListener('click', function () {
+        if (!Store.isStorageOK()) {
+          Store.retrySave();
+          UI.toast('正在重试保存…');
+        }
+      });
+    }
+    // Store 内部保存失败/恢复时主动刷新顶部指示器，不必等下一次页面渲染
+    document.addEventListener('dhu-save-state', updateSaveState);
     window.addEventListener('hashchange', function () { UI.closeDrawer(); render(); });
     document.getElementById('mask').addEventListener('click', UI.closeDrawer);
     document.getElementById('modal-mask').addEventListener('click', function (e) {
@@ -234,6 +249,7 @@
 
   // ---------- 登录 ----------
   function startApp() {
+    if (Store.mustChangePassword && Store.mustChangePassword()) { showPwdScreen(); return; }
     Store.licenseStatus().then(function (st) {
       applyLicenseModules(st);
       if (st && st.state === 'expired') {
@@ -248,8 +264,8 @@
     try { Store.ensurePatrols(); } catch (e) {}
     buildMobileNav();
     bind();
-    // 每次登录（含恢复会话）后默认进入工作台
-    if (location.hash !== '#/dashboard') location.hash = '#/dashboard';
+    // 无深链接时默认进入工作台；直接打开 #/daily-log 等链接时保留原路由
+    if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/dashboard';
     render();
     if (!Store.isStorageOK()) UI.toast('服务器连接异常，修改可能未保存', 'err');
     showLicenseBadge();
@@ -257,6 +273,8 @@
   function showLoginScreen(bootError) {
     var scr = document.getElementById('login-screen');
     scr.style.display = 'flex';
+    var pwdScr = document.getElementById('pwd-screen');
+    if (pwdScr) pwdScr.style.display = 'none';
     document.getElementById('login-err').textContent = bootError || '';
     // 延迟聚焦登录名；若用户/脚本已开始输入则不抢焦点
     setTimeout(function () {
@@ -276,6 +294,11 @@
       Store.login(name, pwd).then(function (u) {
         scr.style.display = 'none';
         renderLoginBadge(u);
+        if (Store.mustChangePassword && Store.mustChangePassword()) {
+          showPwdScreen(pwd);
+          UI.toast('首次登录，请先修改初始密码', 'ok');
+          return;
+        }
         startApp();
         UI.toast('欢迎，' + u, 'ok');
       }).catch(function (e) {
@@ -287,13 +310,59 @@
     document.getElementById('login-pwd').onkeydown = function (e) { if (e.key === 'Enter') doLogin(); };
     document.getElementById('login-name').onkeydown = function (e) { if (e.key === 'Enter') document.getElementById('login-pwd').focus(); };
   }
+  // 首次登录强制改密：改密前不加载业务数据，成功后才进入系统
+  function showPwdScreen(prefillOld) {
+    var scr = document.getElementById('pwd-screen');
+    if (!scr) return;
+    document.getElementById('login-screen').style.display = 'none';
+    scr.style.display = 'flex';
+    var errEl = document.getElementById('pwd-err');
+    var oldEl = document.getElementById('pwd-old');
+    var newEl = document.getElementById('pwd-new');
+    var cfmEl = document.getElementById('pwd-confirm');
+    var btn = document.getElementById('pwd-btn');
+    errEl.textContent = '';
+    oldEl.value = prefillOld || '';
+    newEl.value = '';
+    cfmEl.value = '';
+    document.getElementById('pwd-sub').textContent =
+      (Store.displayName() || Store.currentUser() || '') + '，首次登录必须修改初始密码后才能继续使用';
+    setTimeout(function () { newEl.focus(); }, 60);
+    function submit() {
+      errEl.textContent = '';
+      var o = oldEl.value, n = newEl.value, c = cfmEl.value;
+      if (!o) { errEl.textContent = '请输入当前密码'; return; }
+      if (n.length < 10) { errEl.textContent = '新密码至少 10 位'; return; }
+      if (n !== c) { errEl.textContent = '两次输入的新密码不一致'; return; }
+      if (n === o) { errEl.textContent = '新密码不能与原密码相同'; return; }
+      btn.disabled = true;
+      Store.changePassword(o, n, c).then(function () {
+        // 改密成功后必须先加载业务数据，再进入主界面；否则空 state 会被后续保存覆盖
+        return Store.load();
+      }).then(function () {
+        oldEl.value = ''; newEl.value = ''; cfmEl.value = '';
+        scr.style.display = 'none';
+        startApp();
+        UI.toast('密码修改成功', 'ok');
+      }).catch(function (e) {
+        errEl.textContent = (e && e.message) || '修改失败，请重试';
+      }).then(function () { btn.disabled = false; });
+    }
+    btn.onclick = submit;
+    cfmEl.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
+    document.getElementById('pwd-cancel').onclick = function () {
+      Store.logout();
+      location.reload();
+    };
+  }
+
   function renderLoginBadge(name) {
     var badge = document.getElementById('login-user');
     var out = document.getElementById('logout-btn');
     if (!name) { badge.style.display = 'none'; out.style.display = 'none'; return; }
     var dname = Store.displayName() || name;
     document.getElementById('login-avatar').textContent = dname.slice(0, 1).toUpperCase();
-    document.getElementById('login-name-text').textContent = dname;
+    document.getElementById('login-name-text').textContent = dname === name ? dname : dname + '（' + name + '）';
     badge.style.display = 'inline-flex';
     out.style.display = '';
     out.onclick = function () {
@@ -324,7 +393,8 @@
         var u = Store.currentUser();
         if (u) {
           renderLoginBadge(u);
-          startApp();
+          if (Store.mustChangePassword && Store.mustChangePassword()) showPwdScreen();
+          else startApp();
         } else {
           showLoginScreen();
         }

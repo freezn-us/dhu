@@ -24,7 +24,9 @@ def free_port():
 
 
 PORT = free_port()
-DB = os.path.join(tempfile.gettempdir(), 'dhu_revtest_%d.db' % PORT)
+# 独立临时目录：DB 与试用授权同处一目录，避免 %TEMP% 下旧授权失效导致只读
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_revtest_')
+DB = os.path.join(TMP_DIR, 'dhu_ops.db')
 if os.path.exists(DB):
     os.remove(DB)
 
@@ -55,8 +57,9 @@ def req(path, token=None, data=None, method=None, raw_body=None):
 env = os.environ.copy()
 env['DHU_OPS_PORT'] = str(PORT)
 env['DHU_OPS_DB'] = DB
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
 env['DHU_OPS_HOST'] = '127.0.0.1'
-log = open(os.path.join(tempfile.gettempdir(), 'dhu_revtest_%d.log' % PORT), 'ab', buffering=0)
+log = open(os.path.join(TMP_DIR, 'server.log'), 'ab', buffering=0)
 proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')],
                         cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
 

@@ -1,11 +1,11 @@
 """Manual UX walkthrough — 排班 + PDF + tag-input."""
-import os, sys, time
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
+import os, time
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 OUT = os.path.join(os.path.dirname(__file__), 'screenshots')
 os.makedirs(OUT, exist_ok=True)
-BASE = 'file:///D:/pctools%20win10/dhu/index.html'
+BASE = Path(__file__).resolve().parents[1].joinpath('index.html').as_uri()  # 项目根，换机/换目录零修改
 
 with sync_playwright() as p:
     browser = p.chromium.launch(channel='chrome', headless=True)

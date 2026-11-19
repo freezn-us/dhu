@@ -386,6 +386,18 @@
   var pendingSnapshot = null;   // 尚未发送的最新快照
   var saveTimer = null;
   var saveInFlight = false;
+  var saveRetryTimer = null;    // 失败后的自动重试定时器
+  var saveRetryCount = 0;       // 本轮连续失败次数（成功或用户再次编辑后清零）
+  var SAVE_RETRY_LIMIT = 6;     // 自动重试上限，之后等待用户手动重试
+
+  // 保存状态变化时通知界面（顶部“已同步/保存失败”指示器即时刷新）
+  function emitSaveState() {
+    try {
+      if (typeof document !== 'undefined' && document.dispatchEvent) {
+        document.dispatchEvent(new Event('dhu-save-state'));
+      }
+    } catch (e) {}
+  }
 
   function save() {
     // 内存状态已被调用方改好，这里把整体状态串行 POST 回服务端。
@@ -393,22 +405,53 @@
     // 合并后避免同一份状态被重复全量上传。
     if (!getToken()) return storageOK;
     pendingSnapshot = deepCopy(state);
+    // 用户又产生了新修改：重置退避，尽快把最新快照发出去
+    saveRetryCount = 0;
+    if (saveRetryTimer) { clearTimeout(saveRetryTimer); saveRetryTimer = null; }
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(function () { saveTimer = null; pumpSave(); }, 250);
     return storageOK;
   }
 
   function pumpSave() {
-    if (saveInFlight || !pendingSnapshot) return;
+    if (saveInFlight || saveRetryTimer || !pendingSnapshot) return;
     var snapshot = pendingSnapshot;
     pendingSnapshot = null;
     saveInFlight = true;
     saveQueue = postState(0, snapshot).then(function () {
       saveInFlight = false;
+      saveRetryCount = 0;
+      emitSaveState();
       pumpSave();
-    }, function () {
+    }, function (err) {
       saveInFlight = false;
+      // 失败后不能把这次修改丢掉：若期间没有更新的快照，保留它等待重试
+      if (!pendingSnapshot) pendingSnapshot = snapshot;
+      scheduleSaveRetry(!!(err && err.retry));
+      emitSaveState();
     });
+  }
+
+  // 自动重试退避：2s、4s、8s、16s、30s… 最多 SAVE_RETRY_LIMIT 次，之后交给用户手动重试
+  function scheduleSaveRetry(canRetry) {
+    if (!canRetry || saveRetryCount >= SAVE_RETRY_LIMIT || saveRetryTimer) return;
+    var delay = Math.min(2000 * Math.pow(2, saveRetryCount), 30000);
+    saveRetryCount++;
+    saveRetryTimer = setTimeout(function () {
+      saveRetryTimer = null;
+      pumpSave();
+    }, delay);
+  }
+
+  // 供“保存失败”指示器点击时手动重试
+  function retrySave() {
+    if (!pendingSnapshot) {
+      if (storageOK || !state) return;
+      pendingSnapshot = deepCopy(state);
+    }
+    saveRetryCount = 0;
+    if (saveRetryTimer) { clearTimeout(saveRetryTimer); saveRetryTimer = null; }
+    pumpSave();
   }
 
   // 冲突时把本地独有记录并入服务端最新数据；同编号以本地为准（本机刚做的修改）
@@ -442,8 +485,18 @@
     delete payload.rev;
     return fetch('/api/state', { method: 'POST', headers: authHeaders(), body: JSON.stringify(payload) })
       .then(function (res) {
-        if (res.status === 401) { handleSessionExpired(); return; }
-        if (res.status === 409 && attempt < 3) {
+        if (res.status === 401) {
+          storageOK = false;
+          lastError = '登录状态已失效，请重新登录';
+          handleSessionExpired();
+          return Promise.reject({ keep: false, retry: false });
+        }
+        if (res.status === 409) {
+          if (attempt >= 3) {
+            storageOK = false;
+            lastError = '数据已被其他客户端更新，请刷新页面后重试';
+            return Promise.reject({ keep: false, retry: false });
+          }
           // 版本冲突：有其他客户端先保存了。取回最新数据自动合并后重试
           return res.json().then(function (d) {
             var remote = d && d.state;
@@ -456,21 +509,35 @@
             }
             return postState(attempt + 1, nextSnapshot);
           }, function () {
-            storageOK = false; lastError = '数据已被其他客户端更新，且无法读取最新数据，请刷新页面';
+            storageOK = false;
+            lastError = '数据已被其他客户端更新，且无法读取最新数据，请刷新页面';
+            return Promise.reject({ keep: false, retry: false });
           });
         }
         if (res.ok) {
           return res.json().then(function (d) {
             if (d && typeof d.rev === 'number') serverRev = d.rev;
             storageOK = true; lastError = '';
-          }, function () { storageOK = true; });
+          }, function () { storageOK = true; lastError = ''; });
         }
-        storageOK = false;
+        // 4xx 通常是权限/数据问题，重试无意义；5xx、408、429 可自动重试
+        var retry = res.status >= 500 || res.status === 408 || res.status === 429;
         return res.json().then(function (d) {
+          storageOK = false;
           lastError = (d && d.error) || ('服务器保存失败（HTTP ' + res.status + '）');
-        }, function () { lastError = '服务器保存失败（HTTP ' + res.status + '）'; });
+          return Promise.reject({ keep: true, retry: retry });
+        }, function () {
+          storageOK = false;
+          lastError = '服务器保存失败（HTTP ' + res.status + '）';
+          return Promise.reject({ keep: true, retry: retry });
+        });
       })
-      .catch(function (e) { storageOK = false; lastError = e && e.message ? e.message : '无法连接服务器'; });
+      .catch(function (e) {
+        if (e && (e.keep === true || e.keep === false)) throw e;
+        storageOK = false;
+        lastError = (e && e.message) ? ('无法连接服务器：' + e.message) : '无法连接服务器，请检查网络';
+        throw { keep: true, retry: true };
+      });
   }
 
   function handleSessionExpired() {
@@ -561,11 +628,24 @@
     return fetch('/api/state', { headers: authHeaders() })
       .then(function (res) {
         if (res.status === 401) { setToken(''); sessionUser = null; return null; }
+        if (res.status === 403) {
+          // 首次登录未改密：服务端只放行 /api/me 等少数接口，先进入改密流程
+          return res.json().catch(function () { return {}; }).then(function (d) {
+            if (d && d.code === 'must_change_password') {
+              mustChangePwd = true;
+              return { __mustChange: true };
+            }
+            throw new Error((d && d.error) || '服务器读取失败（HTTP 403）');
+          });
+        }
         if (!res.ok) throw new Error('服务器读取失败（HTTP ' + res.status + '）');
         return res.json();
       })
       .then(function (obj) {
         if (obj === null) return null; // 401
+        if (obj && obj.__mustChange) {
+          return refreshMe().then(function () { return sessionUser; }, function () { return sessionUser; });
+        }
         if (!obj || !Array.isArray(obj.tickets)) {
           // 服务端首次为空：生成演示数据并推回
           seedDemo();
@@ -3258,6 +3338,7 @@
   var sessionPerms = [];
   var sessionDisplayName = '';
   var sessionRole = '';
+  var mustChangePwd = false;
   try {
     sessionUser = localStorage.getItem(USER_KEY) || null;
     sessionDisplayName = localStorage.getItem(DNAME_KEY) || '';
@@ -3294,11 +3375,17 @@
       sessionPerms = Array.isArray(data.permissions) ? data.permissions.slice() : [];
       sessionDisplayName = data.display_name || data.name;
       sessionRole = data.role || '';
+      mustChangePwd = !!data.must_change_pwd;
       try {
         localStorage.setItem(USER_KEY, data.name);
         localStorage.setItem(DNAME_KEY, sessionDisplayName);
         localStorage.setItem(ROLE_KEY, sessionRole);
       } catch (e) {}
+      // 首次登录未改密：/api/state 会被服务端拦截，先只取当前用户信息，
+      // 由界面弹出强制改密页，改密成功后再加载业务数据。
+      if (mustChangePwd) {
+        return refreshMe().then(function () { return data.name; }, function () { return data.name; });
+      }
       // 登录后拉取服务端数据
       return load().then(function () { return data.name; });
     });
@@ -3313,6 +3400,7 @@
     sessionPerms = [];
     sessionDisplayName = '';
     sessionRole = '';
+    mustChangePwd = false;
     try {
       localStorage.removeItem(USER_KEY);
       localStorage.removeItem(DNAME_KEY);
@@ -3338,14 +3426,30 @@
       if (!r.ok) throw new Error('获取用户信息失败');
       return r.json();
     }).then(function (d) {
+      sessionUser = d.name || sessionUser;
       sessionIsAdmin = !!d.is_admin;
       sessionPerms = Array.isArray(d.permissions) ? d.permissions.slice() : [];
       sessionDisplayName = d.display_name || d.name || sessionUser || '';
       sessionRole = d.role || '';
+      mustChangePwd = !!d.must_change_pwd;
       try {
+        if (sessionUser) localStorage.setItem(USER_KEY, sessionUser);
         localStorage.setItem(DNAME_KEY, sessionDisplayName);
         localStorage.setItem(ROLE_KEY, sessionRole);
       } catch (e) {}
+      return d;
+    });
+  }
+
+  function mustChangePassword() { return mustChangePwd; }
+
+  // 首次登录/主动改密：成功后清除强制改密标记，界面再加载业务数据
+  function changePassword(oldPwd, newPwd, confirmPwd) {
+    return fetch('/api/change-password', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ old_pwd: oldPwd, new_pwd: newPwd, confirm_pwd: confirmPwd })
+    }).then(handleApiResp).then(function (d) {
+      mustChangePwd = false;
       return d;
     });
   }
@@ -3468,10 +3572,13 @@
     PERIODS: PERIODS, PATROL_ITEMS: PATROL_ITEMS, LOG_TYPES: LOG_TYPES,
     load: load, getState: getState, save: save,
     flushSave: function () {
-      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; pumpSave(); }
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      if (saveRetryTimer) { clearTimeout(saveRetryTimer); saveRetryTimer = null; }
+      pumpSave();
       return saveQueue;
     },
     isStorageOK: function () { return storageOK; }, lastError: function () { return lastError; },
+    retrySave: retrySave,
     buildingOf: buildingOf, floorOf: floorOf, periodOf: periodOf, periodInfo: periodInfo, periodStart: periodStart, weekInfo: weekInfo,
     esc: esc, pad: pad, nowLocal: nowLocal, isoLocal: isoLocal, dateKey: dateKey,
     parseDT: parseDT, fmtDT: fmtDT, fmtFull: fmtFull, fmtDate: fmtDate, addMin: addMin, minutesBetween: minutesBetween,
@@ -3494,6 +3601,7 @@
     matchKb: matchKb, recordKbHit: recordKbHit, settleToKb: settleToKb, kbRefStats: kbRefStats, kbCountByFault: kbCountByFault,
     ROOM_ZONES: ROOM_ZONES, ROOM_TYPES: ROOM_TYPES,
     login: login, logout: logout, currentUser: currentUser, displayName: displayName, userRole: userRole,
+    mustChangePassword: mustChangePassword, changePassword: changePassword,
     audit: audit, listAudit: listAudit,
     isAdmin: isAdmin, permissions: permissions, hasPermission: hasPermission, refreshMe: refreshMe,
     createDesktopShortcut: createDesktopShortcut,

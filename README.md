@@ -2,7 +2,7 @@
 
 面向东华大学松江校区多媒体教室的运维管理平台：报修受理、工作日志填报、巡视打卡、教室/设备档案、统计报表。
 
-- **当前版本**：v1.5.1（见 [version.json](version.json)；上一版 v1.5.0-beta.1 封测版）
+- **当前版本**：v1.5.2（2026-11-17：保存事务/巡视统计修复，随机初始口令与强制改密，默认仅本机监听；见 [version.json](version.json)；上一版 v1.5.1）
 - **架构**：Flask + SQLite 后端（`server.py`）+ 原生 JS 单页前端（`assets/`），PyInstaller 打包为 Windows 安装包
 - **数据规模**：253 间教室（一教 89 / 二教 92 / 四教 32 / 化工楼 18 / 中南楼 16 / 机房 6）
 - **交付形态**：单机或局域网部署，含 RSA 授权与桌面启动器，双击图标即用
@@ -20,7 +20,11 @@
 python server.py
 ```
 
-默认 `http://127.0.0.1:8420`，账号 `admin / admin123`（**首次部署务必修改**）。
+默认 `http://127.0.0.1:8420`（仅本机）。首次启动自动生成随机 12 位管理员初始密码，写入数据库目录下的 `初始管理员密码.txt`，账号 `admin`；首次登录会强制改密，改密成功后该文件自动删除。开发环境可用 `DHU_OPS_INITIAL_ADMIN_PWD` 指定初始口令（仅测试用，会跳过强制改密）。
+
+> 首次空库登录会写入一批演示工单/巡视数据，便于熟悉界面；正式使用前请在「数据维护」中清空演示数据，或停止服务后删除数据库重新初始化（会重新生成初始密码）。
+
+局域网访问：在程序目录（开发为项目根，安装后为 `server.exe` 所在目录）新建 `access.txt` 写入 `lan`；写入 `local` 或删除文件则仅本机。旧部署没有 `access.txt` 且已有数据库时保持原来的 `0.0.0.0` 行为，避免升级后失联。安装器提供“允许局域网访问”选项（默认不勾选），勾选后同时把防火墙规则限制为专用网络 + 本地子网。
 
 环境变量：
 
@@ -28,7 +32,8 @@ python server.py
 | --- | --- | --- |
 | `DHU_OPS_PORT` | 服务端口 | `8420` |
 | `DHU_OPS_DB` | SQLite 数据库路径 | 开发 `data/dhu_ops.db`；打包后 `%ProgramData%\DHU-Ops\dhu_ops.db` |
-| `DHU_OPS_HOST` | 监听地址 | `0.0.0.0`（**局域网内其他机器可访问**；仅本机请设为 `127.0.0.1`） |
+| `DHU_OPS_HOST` | 监听地址（优先级最高） | `127.0.0.1`；`access.txt=lan` 时 `0.0.0.0`；旧库无 `access.txt` 时 `0.0.0.0` |
+| `DHU_OPS_INITIAL_ADMIN_PWD` | 首次建库时的管理员初始口令（测试用） | 空（随机生成） |
 | `DHU_KEYS_DIR` | 厂商私钥目录 | 项目同级 `../dhu-keys`（签发工具用，服务端不需要） |
 
 端口优先级：`DHU_OPS_PORT` > `HTTP_PLATFORM_PORT`（IIS 注入）> 程序目录 `port.txt` > `8420`。
@@ -73,9 +78,10 @@ python server.py
 - 12 个可勾选权限点（`server.py` 的 `PERMISSIONS`），与左侧菜单一一对应
 - `user-manage`、`audit` 两页不进勾选列表，**仅管理员可见**
 - 密码 PBKDF2-HMAC-SHA256（20 万次迭代）+ salt 存 `users` 表，会话 token 存 `sessions` 表（24 小时过期，旧哈希登录时自动升级）
+- 首次安装生成随机 12 位管理员初始密码（`初始管理员密码.txt`），`must_change_pwd=1`，改密前仅 `/api/me`、`/api/change-password`、`/api/logout` 等身份接口可用；密码至少 10 位、不得与登录名相同；管理员重置他人密码后强制其重新改密并删除其旧会话；离线可用 `server.exe --reset-admin` 重置
 - 日志改删权限：普通用户可编辑/删除**当天**任意日志，历史日期只读
-- **服务端权限校验（v1.5.1 起）**：权限点不再只控制菜单显隐。`/api/state` 按「本次提交中发生变化的顶层域」检查权限点（映射见 `STATE_FIELD_PERMS`），越权返回 **403** 并附 `denied` 列表，且不写库；管理员恒放行，首次写入（空库）放行，未改动字段原样提交不受影响。`/api/report/pdf` 需 `reports` 权限
-  > 权限点是**页面级**而非行级：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口被工作台依赖，暂未加权限校验
+- **服务端权限校验（v1.5.1 起）**：权限点不再只控制菜单显隐。`/api/state` 按「本次提交中发生变化的顶层域」检查权限点（映射见 `STATE_FIELD_PERMS`），越权返回 **403** 并附 `denied` 列表，且不写库；管理员恒放行，首次写入（空库）放行，未改动字段原样提交不受影响。六个报表 JSON 接口与 `/api/report/pdf` 需 `reports` 权限；CSV 导出需 `data`/`tickets`/`reports` 之一；审计上报按类别校验权限（页面访问全员、登录/用户/系统仅管理员）
+  > 权限点是**页面级**而非行级：`/api/state` GET 仍返回全量业务数据
 
 ## 五、授权（License）
 
@@ -146,7 +152,7 @@ python tests/test_daily_import.py    # 真实日报导入校验
 
 共 16 个测试脚本。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
 
-- 原硬编码旧路径 `d:\pctools win10\dhu` 的 6 个脚本（`test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、`test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`）已全部改为基于 `__file__` 动态解析；旧机器临时 `pylibs` 仅在该目录真实存在时才加入搜索路径，依赖统一由 `.build-venv` 提供。
+- 原硬编码旧路径 `d:\pctools win10\dhu` 的 6 个脚本（`test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、`test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`）已全部改为基于 `__file__` 动态解析；旧机器临时 `pylibs` 搜索路径已从全部测试脚本移除，依赖统一由 `.build-venv` 提供。
 - 其中 3 个脚本需要真实日报 xlsx 样本：`test_daily_import.py` / `test_export_format.py` 用 `DHU_TEST_XLSX`（或 `tests/fixtures/daily-log.xlsx`），`test_march_import.py` 用 `DHU_TEST_MARCH_XLSX`（或 `tests/fixtures/march-log.xlsx`）。缺样本时会给出明确提示并退出，不再抛 FileNotFoundError。
 - `tests/test_state_rev.py`：乐观锁与统一错误响应（15 项）。
 - `tests/test_state_perm.py`：服务端权限校验回归（31 项，临时库 + 临时端口，不碰正式数据）。

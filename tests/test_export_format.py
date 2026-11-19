@@ -1,9 +1,5 @@
 """验证导出 Excel 与「9月多媒体教室每日运维工作日志」附件版式一致，并验证按月区间导出。"""
 import sys, os, re, json, time, subprocess, tempfile, urllib.request, socket
-# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
-_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
-if os.path.isdir(_PYLIBS):
-    sys.path.insert(0, _PYLIBS)
 
 from playwright.sync_api import sync_playwright
 import openpyxl
@@ -15,11 +11,11 @@ if not os.path.isfile(SRC):
                      '或把样本放到 tests/fixtures/daily-log.xlsx。当前查找路径：' + SRC)
 
 s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
-DB = os.path.join(tempfile.gettempdir(), f'dhu_exp_{port}.db')
-if os.path.exists(DB):
-    os.remove(DB)
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_exp_')
+DB = os.path.join(TMP_DIR, 'dhu_ops.db')
 env = os.environ.copy(); env['DHU_OPS_PORT'] = str(port); env['DHU_OPS_DB'] = DB
-log = open(os.path.join(tempfile.gettempdir(), f'dhu_exp_{port}.log'), 'ab', buffering=0)
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
+log = open(os.path.join(TMP_DIR, 'server.log'), 'ab', buffering=0)
 srv = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')], cwd=ROOT, env=env,
                        stdout=log, stderr=subprocess.STDOUT)
 for _ in range(60):

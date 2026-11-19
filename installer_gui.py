@@ -2,12 +2,13 @@
 """东华大学多媒体教室运维系统 · 图形化安装程序
 
 双击运行（会自动请求管理员权限），可选择安装目录与端口，一键完成：
-停止旧实例 -> 复制程序 -> 写端口配置 -> 注册开机自启 -> 防火墙放行 -> 启动服务。
+停止旧实例 -> 复制程序 -> 写端口/访问范围配置 -> 注册开机自启 -> 按需放行私网防火墙 -> 启动服务。
+默认仅本机访问；勾选「允许局域网访问」后才监听 0.0.0.0 并放行专用网络。
 不依赖 cmd 批处理与 PowerShell 脚本，避免系统策略拦截。
 
 命令行模式（供排查/自动化）：
-  DHU-Ops-Setup.exe --selftest                仅做环境自检，不做任何修改
-  DHU-Ops-Setup.exe --install-cli 目录 端口    无界面安装
+  DHU-Ops-Setup.exe --selftest                  仅做环境自检，不做任何修改
+  DHU-Ops-Setup.exe --install-cli 目录 端口 [lan|local]  无界面安装
 """
 import base64
 import ctypes
@@ -287,8 +288,28 @@ def copy_launcher(target, log=print):
         shutil.copy2(ico, os.path.join(target, ICON_NAME))
 
 
-def install(target, port, log=print):
-    """执行安装，返回 True/False。"""
+def default_allow_lan(target=DEFAULT_DIR):
+    """安装界面「允许局域网访问」的默认值。
+
+    - 已有 access.txt：沿用上次选择；
+    - 无 access.txt 但数据库已存在：旧版本升级，保持原来的局域网可访问行为；
+    - 全新安装：默认仅本机。
+    """
+    path = os.path.join(target, 'access.txt')
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            v = f.read().strip().lower()
+        if v in ('lan', '1', 'true', 'yes', 'on'):
+            return True
+        if v in ('local', '0', 'false', 'no', 'off'):
+            return False
+    except Exception:
+        pass
+    return os.path.exists(os.path.join(DATA_DIR, 'dhu_ops.db'))
+
+
+def install(target, port, allow_lan=False, log=print):
+    """执行安装，返回 True/False。allow_lan=False 时服务仅监听 127.0.0.1。"""
     src = bundled_exe()
     if not os.path.exists(src):
         log('[错误] 安装包内缺少 %s' % EXE_NAME)
@@ -307,6 +328,9 @@ def install(target, port, log=print):
     write_version_tools(target, log)
     with open(os.path.join(target, 'port.txt'), 'w') as f:
         f.write(str(port))
+    # 访问范围写入程序目录：服务端启动时据此决定监听 0.0.0.0 还是 127.0.0.1
+    with open(os.path.join(target, 'access.txt'), 'w', encoding='utf-8') as f:
+        f.write('lan\n' if allow_lan else 'local\n')
     os.makedirs(DATA_DIR, exist_ok=True)
     # 授权本机用户读写数据目录：计划任务未运行时，启动器可直接拉起服务端
     run(['icacls', DATA_DIR, '/grant', '*S-1-5-32-545:(OI)(CI)M'])
@@ -317,13 +341,17 @@ def install(target, port, log=print):
     if code != 0:
         log('[提醒] 计划任务注册失败（%s），将改为直接启动服务端' % out)
 
-    log('配置防火墙（放行 TCP %d）' % port)
+    log('配置防火墙（%s）' % ('放行私网 TCP %d' % port if allow_lan else '不开放入站'))
     for name in (RULE_OLD, RULE_PORT, RULE_PROG):
         run(['netsh', 'advfirewall', 'firewall', 'delete', 'rule', 'name=' + name])
-    run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=' + RULE_PORT,
-         'dir=in', 'action=allow', 'protocol=TCP', 'localport=%d' % port, 'profile=any'])
-    run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=' + RULE_PROG,
-         'dir=in', 'action=allow', 'program=%s' % dst, 'profile=any'])
+    if allow_lan:
+        # 只放行专用网络、且仅限本地子网，避免把服务暴露到公共网络
+        run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=' + RULE_PORT,
+             'dir=in', 'action=allow', 'protocol=TCP', 'localport=%d' % port,
+             'profile=private', 'remoteip=LocalSubnet'])
+        run(['netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=' + RULE_PROG,
+             'dir=in', 'action=allow', 'program=%s' % dst,
+             'profile=private', 'remoteip=LocalSubnet'])
 
     log('启动服务...')
     code, out = run(['schtasks', '/run', '/tn', TASK_NAME])
@@ -462,10 +490,15 @@ def main():
         i = sys.argv.index('--install-cli')
         target = sys.argv[i + 1] if len(sys.argv) > i + 1 else DEFAULT_DIR
         port = int(sys.argv[i + 2]) if len(sys.argv) > i + 2 else DEFAULT_PORT
+        # 第三个可选参数：lan/local；缺省时沿用已有选择（全新安装默认仅本机）
+        if len(sys.argv) > i + 3:
+            allow_lan = sys.argv[i + 3].strip().lower() in ('lan', '1', 'true', 'yes', 'on')
+        else:
+            allow_lan = default_allow_lan(target)
         if not is_admin():
             print('需要管理员权限')
             return 1
-        return 0 if install(target, port) else 1
+        return 0 if install(target, port, allow_lan) else 1
 
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -524,6 +557,10 @@ def main():
     port_entry.grid(row=1, column=1, sticky='w', padx=8)
     port_hint = tk.Label(form, text='1024-65535，安装前会自动检测是否被占用', fg='#888')
     port_hint.grid(row=1, column=1, sticky='e', padx=8)
+
+    lan_var = tk.BooleanVar(value=default_allow_lan(dir_var.get().strip() or DEFAULT_DIR))
+    ttk.Checkbutton(form, text='允许局域网访问（同事可通过本机 IP 访问；仅放行专用网络）',
+                    variable=lan_var).grid(row=2, column=0, columnspan=3, sticky='w', pady=4)
     form.columnconfigure(1, weight=1)
 
     btns = tk.Frame(root)
@@ -572,16 +609,21 @@ def main():
             return None
         return p
 
-    def worker(target, port):
-        ok = install(target, port, log)
+    def worker(target, port, allow_lan):
+        ok = install(target, port, allow_lan, log)
         def done():
             install_btn.configure(state='normal')
             if ok:
-                ips = local_ips()
                 msg = '安装完成，服务已启动！\n\n本机访问：http://127.0.0.1:%d' % port
-                for ip in ips:
-                    msg += '\n局域网访问：http://%s:%d' % (ip, port)
-                msg += '\n\n默认账号 admin / admin123，登录后请立即修改密码。\n数据库：%s' % os.path.join(DATA_DIR, 'dhu_ops.db')
+                if allow_lan:
+                    for ip in local_ips():
+                        msg += '\n局域网访问：http://%s:%d' % (ip, port)
+                    msg += '\n（已放行专用网络与本地子网）'
+                else:
+                    msg += '\n当前仅本机可访问；如需同事访问，请重新安装并勾选「允许局域网访问」。'
+                msg += ('\n\n初始管理员密码（一次性）：\n%s\n首次登录必须修改密码，修改成功后该文件自动删除。'
+                        % os.path.join(DATA_DIR, '初始管理员密码.txt'))
+                msg += '\n数据库：%s' % os.path.join(DATA_DIR, 'dhu_ops.db')
                 msg += '\n\n桌面已生成「%s」图标，双击即可直接打开系统。' % SHORTCUT_NAME
                 open_btn.configure(state='normal')
                 messagebox.showinfo(APP_TITLE, msg)
@@ -605,7 +647,7 @@ def main():
                                        '继续安装会先停止旧实例，是否继续？' % port):
                 return
         install_btn.configure(state='disabled')
-        threading.Thread(target=worker, args=(target, port), daemon=True).start()
+        threading.Thread(target=worker, args=(target, port, bool(lan_var.get())), daemon=True).start()
 
     def do_uninstall():
         target = dir_var.get().strip().strip('"') or DEFAULT_DIR

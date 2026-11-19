@@ -2,6 +2,7 @@
 服务端版本：启动 Flask 后端（server.py + 临时 SQLite），验证 token 鉴权与服务端持久化。
 运行：python tests/ui_selftest.py
 """
+import datetime
 import json
 import os
 import socket
@@ -18,7 +19,6 @@ SHOTS = os.path.join(ROOT, 'tests', 'screenshots')
 os.makedirs(OUT, exist_ok=True)
 os.makedirs(SHOTS, exist_ok=True)
 
-sys.path.insert(0, r'C:\Users\user\AppData\Local\Temp\pylibs')
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 results = []
@@ -41,7 +41,8 @@ def free_port():
 
 
 PORT = free_port()
-DB_PATH = os.path.join(tempfile.gettempdir(), 'dhu_selftest_%d.db' % PORT)
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_selftest_')
+DB_PATH = os.path.join(TMP_DIR, 'dhu_selftest_%d.db' % PORT)
 if os.path.exists(DB_PATH):
     os.remove(DB_PATH)
 
@@ -50,6 +51,7 @@ def start_server():
     env = os.environ.copy()
     env['DHU_OPS_PORT'] = str(PORT)
     env['DHU_OPS_DB'] = DB_PATH
+    env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
     # 注意：Windows 下 click/colorama 写 DEVNULL 会抛 OSError，输出重定向到日志文件
     log = open(os.path.join(OUT, 'flask-server.log'), 'ab', buffering=0)
     proc = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')],
@@ -76,17 +78,15 @@ def api(path, token=None, data=None):
 server = start_server()
 BASE = 'http://127.0.0.1:%d/index.html' % PORT
 TOKEN = api('/api/login', data={'name': 'admin', 'pwd': 'admin123'})['token']
-# 登录流程用独立账号验证，避免同账号二次登录把脚本的 admin 会话顶掉（单点登录）
-try:
-    api('/api/users', token=TOKEN, data={'name': 'tester', 'pwd': 'login123', 'role': '工程师', 'display_name': '测试账号'})
-except urllib.error.HTTPError:
-    pass
+# 登录流程用独立账号验证；账号在页面完成 seedDemo 之后再创建（工程师名单来自 state）
 
 
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(channel='chrome', headless=True)
         ctx = browser.new_context(viewport={'width': 1440, 'height': 960}, accept_downloads=True)
+        # 固定到当天 10:00，避免晚上运行时巡视时段已过、自动补完成导致「打卡」按钮消失
+        ctx.clock.install(time=datetime.datetime.now().replace(hour=10, minute=0, second=0, microsecond=0))
         # 预置服务端签发的真 token，跳过登录页
         ctx.add_init_script("try{localStorage.setItem('dhu_ops_token', %s);localStorage.setItem('dhu_ops_user','admin')}catch(e){}" % json.dumps(TOKEN))
         page = ctx.new_page()
@@ -100,6 +100,11 @@ def main():
 
         # ---------- 0. 登录流程 ----------
         # 主 ctx 已预置登录态 → 徽章应显示；登录页流程用独立 context（无预置）验证
+        # 此时首屏已 seedDemo 写入工程师名单，可创建测试账号（避免同账号二次登录顶掉 admin 会话）
+        try:
+            api('/api/users', token=TOKEN, data={'name': 'tester', 'pwd': 'login12345', 'role': '工程师', 'display_name': '周佳辉'})
+        except urllib.error.HTTPError:
+            pass
         badge_text = page.locator('#login-name-text').inner_text()
         check('登录徽章显示当前用户', page.locator('#login-user').is_visible() and bool(badge_text.strip()), badge_text)
         login_ctx = browser.new_context(viewport={'width': 1440, 'height': 960})
@@ -114,7 +119,7 @@ def main():
         lp.wait_for_timeout(600)
         check('错误密码提示', '错误' in lp.locator('#login-err').inner_text(), lp.locator('#login-err').inner_text())
         check('登录失败后仍在登录页', lp.locator('#login-screen').is_visible())
-        lp.fill('#login-pwd', 'login123')
+        lp.fill('#login-pwd', 'login12345')
         lp.click('#login-btn')
         lp.wait_for_timeout(1200)
         check('正确密码登录进入主界面', not lp.locator('#login-screen').is_visible() and lp.locator('.kpi').count() >= 5)
@@ -188,6 +193,15 @@ def main():
         check('补录后日志状态=closed', filled == 'closed', filled)
         preserved = page.evaluate('Store.findTicket("%s").no' % no)
         check('补录保留原编号', preserved == no, preserved)
+        # 补录后可能弹出「结案沉淀知识库」引导弹窗；不处理会遮挡后续点击
+        page.wait_for_timeout(500)
+        if page.locator('#modal-mask.show').count():
+            skip = page.locator('#modal-mask button', has_text='跳过')
+            if skip.count():
+                skip.first.click()
+            else:
+                page.evaluate('UI.closeModal()')
+            page.wait_for_timeout(200)
 
         page.evaluate("App.go('daily-log')")
         page.wait_for_timeout(500)
@@ -325,7 +339,7 @@ def main():
           var html = Views.reports.renderPdfReport(s, days, UI.todayStr() + ' 至 ' + UI.todayStr(),
             Views.reports.buildAnalysis(s, days));
           return {ok: html && html.length > 3000, len: html.length,
-            hasAnalysis: html.indexOf('分析报告') >= 0, hasHeader: html.indexOf('东华大学') >= 0 && html.indexOf('日志总量') >= 0,
+            hasAnalysis: html.indexOf('分析报告') >= 0, hasHeader: html.indexOf('东华大学') >= 0 && html.indexOf('工单总量') >= 0,
             hasPrintMedia: html.indexOf('@media print') >= 0};
         })()
         """)

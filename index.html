@@ -78,6 +78,23 @@
   </div>
 </div>
 
+<div class="login-screen" id="pwd-screen" style="display:none">
+  <div class="login-box">
+    <div class="login-logo">
+      <span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
+      <h2>修改初始密码</h2>
+    </div>
+    <div class="login-sub" id="pwd-sub">首次登录必须修改密码后才能使用系统</div>
+    <div class="field"><label>当前密码</label><input class="input" id="pwd-old" type="password" autocomplete="current-password" placeholder="请输入当前密码"></div>
+    <div class="field"><label>新密码</label><input class="input" id="pwd-new" type="password" autocomplete="new-password" placeholder="至少 10 位，不能与登录名相同"></div>
+    <div class="field"><label>确认新密码</label><input class="input" id="pwd-confirm" type="password" autocomplete="new-password" placeholder="请再次输入新密码"></div>
+    <button class="login-btn" id="pwd-btn">修改并进入系统</button>
+    <div class="login-err" id="pwd-err"></div>
+    <button class="login-btn" id="pwd-cancel" style="margin-top:8px;background:#fff;color:#1677ff;border:1px solid #1677ff">退出登录</button>
+    <div class="login-copy">初始密码见安装目录下的「初始管理员密码.txt」<br>修改成功后该文件会自动删除</div>
+  </div>
+</div>
+
 <noscript><div style="padding:40px;text-align:center;font-size:14px">本系统需要启用 JavaScript 才能运行。</div></noscript>
 
 <script>

@@ -3,10 +3,6 @@
 运行：python tests/test_march_import.py
 """
 import sys, os, re, json, time, subprocess, tempfile, urllib.request, base64
-# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
-_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
-if os.path.isdir(_PYLIBS):
-    sys.path.insert(0, _PYLIBS)
 
 from playwright.sync_api import sync_playwright
 
@@ -19,11 +15,13 @@ OUT_XLSX = os.path.join(ROOT, 'tests', 'output', 'export-march-format.xlsx')
 
 import socket
 s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
-DB_PATH = os.path.join(tempfile.gettempdir(), f'dhu_march_import_{port}.db')
+TMP_DIR = tempfile.mkdtemp(prefix='dhu_march_import_')
+DB_PATH = os.path.join(TMP_DIR, f'dhu_march_import_{port}.db')
 if os.path.exists(DB_PATH):
     os.remove(DB_PATH)
 env = os.environ.copy(); env['DHU_OPS_PORT'] = str(port); env['DHU_OPS_DB'] = DB_PATH
-log = open(os.path.join(tempfile.gettempdir(), f'dhu_march_{port}.log'), 'ab', buffering=0)
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
+log = open(os.path.join(TMP_DIR, f'dhu_march_{port}.log'), 'ab', buffering=0)
 httpd = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')], cwd=ROOT, env=env,
                          stdout=log, stderr=subprocess.STDOUT)
 for _ in range(50):

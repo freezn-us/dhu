@@ -522,7 +522,7 @@
       '<td>平均满意度</td><td>' + (s.satisfaction == null ? '—' : s.satisfaction.toFixed(2)) + ' / 5</td></tr>';
 
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
-      '<title>东华大学松江校区多媒体教室运维统计报告 · ' + from + ' 至 ' + to + '</title>' +
+      '<title>东华大学松江校区多媒体教室运维统计报告 · ' + S.esc(tx) + '</title>' +
       '<style>' +
       'body{font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;color:#1f2937;background:#fff;margin:0;padding:34px 40px;line-height:1.55;font-size:13px}' +
       '.hd{text-align:center;border-bottom:3px solid #1677ff;padding-bottom:14px;margin-bottom:18px}' +

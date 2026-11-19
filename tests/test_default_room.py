@@ -1,15 +1,11 @@
 """缺少教室编号时默认 0000 导入的验证（东华日报版式）。"""
 import sys, os, re, json, time, subprocess, tempfile, urllib.request, socket
 
-# 依赖由项目 .build-venv 提供；仅当旧机器临时 pylibs 真实存在时才加入搜索路径
-_PYLIBS = r'C:\Users\user\AppData\Local\Temp\pylibs'
-if os.path.isdir(_PYLIBS):
-    sys.path.insert(0, _PYLIBS)
 from playwright.sync_api import sync_playwright
 import openpyxl
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根，换机/换目录零修改
-TMP = tempfile.gettempdir()
+TMP = tempfile.mkdtemp(prefix='dhu_default_room_')
 XLSX = os.path.join(TMP, 'dhu_default_room.xlsx')
 
 # ---------- 构造一个缺教室编号的东华日报表 ----------
@@ -33,6 +29,7 @@ DB = os.path.join(TMP, f'dhu_default_room_{port}.db')
 if os.path.exists(DB):
     os.remove(DB)
 env = os.environ.copy(); env['DHU_OPS_PORT'] = str(port); env['DHU_OPS_DB'] = DB
+env['DHU_OPS_INITIAL_ADMIN_PWD'] = 'admin123'  # 测试固定初始口令，跳过强制改密
 log = open(os.path.join(TMP, f'dhu_default_room_{port}.log'), 'ab', buffering=0)
 httpd = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server.py')], cwd=ROOT, env=env,
                          stdout=log, stderr=subprocess.STDOUT)
@@ -115,20 +112,23 @@ with sync_playwright() as p:
 
     tks = page.evaluate('window.Store.getState().tickets.map(function(t){return {room:t.room,desc:t.desc,no:t.no}})')
     print('tickets:', json.dumps(tks, ensure_ascii=False))
-    if len(tks) == 2:
-        ok('导入 2 条日志', f'{len(tks)} 条')
+    # 页面渲染会确保当天巡视任务并自动补完成，可能额外生成巡检日志；只统计本次导入的 9 月 1 日记录
+    imported = [t for t in tks if '20260901' in (t['no'] or '')]
+    if len(imported) == 2:
+        ok('导入 2 条日志', f'{len(imported)} 条')
     else:
-        bad('导入条数', f'{len(tks)} 条')
-    if any((t['room'] or '') == '' and '投影仪' in (t['desc'] or '') for t in tks):
+        bad('导入条数', f'{len(imported)} 条（总 {len(tks)}）')
+    if any((t['room'] or '') == '' and '投影仪' in (t['desc'] or '') for t in imported):
         ok('缺教室编号的记录正常导入且教室为空', '(空)')
     else:
-        bad('缺教室编号未正常导入', str(tks))
-    if any(t['room'] == '1118' for t in tks):
+        bad('缺教室编号未正常导入', str(imported))
+    if any(t['room'] == '1118' for t in imported):
         ok('原有教室编号保持 1118', '1118')
     else:
-        bad('正常教室编号被改写', str(tks))
+        bad('正常教室编号被改写', str(imported))
 
     # 附件模板本身也要能全量导入（3 行，含 1 行巡检）
+    before2 = page.evaluate('window.Store.getState().tickets.length')
     page.locator('#file-import').set_input_files(local_tpl)
     page.wait_for_timeout(2500)
     a2 = [a.inner_text() for a in page.locator('#import-result .alert').all()]
@@ -142,10 +142,10 @@ with sync_playwright() as p:
         btn2.first.click()
         page.wait_for_timeout(800)
     tks2 = page.evaluate('window.Store.getState().tickets.map(function(t){return {room:t.room,logType:t.logType}})')
-    if len(tks2) == 5:
-        ok('模板 3 行全部入库（含巡检行）', '共 5 条')
+    if len(tks2) - before2 == 3:
+        ok('模板 3 行全部入库（含巡检行）', f'新增 {len(tks2) - before2} 条')
     else:
-        bad('模板导入行数', f'共 {len(tks2)} 条')
+        bad('模板导入行数', f'新增 {len(tks2) - before2} 条（总 {len(tks2)}）')
     if any(t['logType'] == 'patrol' for t in tks2):
         ok('模板中的巡检行也正常入库', 'patrol')
     else:
