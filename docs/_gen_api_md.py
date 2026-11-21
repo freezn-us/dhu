@@ -31,6 +31,7 @@ GROUPS = [
     ('备份与恢复', ('/api/backups', '/api/backup', '/api/backup/restore')),
     ('账号与权限', ('/api/users', '/api/groups', '/api/permissions')),
     ('审计', ('/api/audit',)),
+    ('排课查询', ('/api/schedule',)),
     ('统计报表', ('/api/report/',)),
 ]
 
@@ -93,6 +94,15 @@ def auth_of(decorators):
     names = [dec_name(d) for d in decorators]
     if 'require_admin' in names:
         return '管理员'
+    for d in decorators:
+        if dec_name(d) != 'require_perm':
+            continue
+        perms = []
+        if isinstance(d, ast.Call):
+            for a in d.args:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    perms.append(a.value)
+        return '权限：%s' % ('/'.join(perms) if perms else '（未声明）')
     if 'require_auth' in names:
         return '登录用户'
     return '无需登录'
@@ -148,7 +158,8 @@ def render(rows):
     o.write('> 重新生成：`python docs/_gen_api_md.py`（不导入 server，无建库副作用）\n\n')
     o.write('## 调用约定\n\n')
     o.write('- 鉴权列含义：**登录用户** = 需 `Authorization: Bearer <token>`（token 由 `/api/login` 签发）；'
-            '**管理员** = 在登录基础上还要求管理员角色；**无需登录** = 公开接口。\n')
+            '**管理员** = 在登录基础上还要求管理员角色；**权限：x/y** = 登录且拥有 x 或 y 任一权限点；'
+            '**无需登录** = 公开接口。\n')
     o.write('- 未登录或会话失效返回 401；权限不足返回 403；参数错误返回 400 与 `{"error": "原因"}`。'
             '`/api/` 下所有错误统一为 JSON。\n')
     o.write('- 业务数据以 `/api/state` 整体读写（GET 下发含 `rev`，POST 回带 `baseRev` 做乐观锁；'
@@ -177,7 +188,7 @@ def main():
     rows = collect()
     text, total = render(rows)
     path = os.path.join(HERE, 'api.md')
-    with io.open(path, 'w', encoding='utf-8') as f:
+    with io.open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
     # 自检：若受保护接口被标为「无需登录」，说明解析退化，直接失败而非产出错文档

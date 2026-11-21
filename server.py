@@ -10,20 +10,24 @@ Flask + SQLite：静态文件托管 + 登录鉴权 + 状态持久化。
 """
 import base64
 import csv
+import datetime
 import hashlib
 import io
 import json
 import os
 import secrets
+import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from functools import wraps
 from urllib.parse import quote
 
-from flask import Flask, Response, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 
 # PyInstaller 打包后，静态资源在 sys._MEIPASS 临时目录；数据库落到可写的 ProgramData
 if getattr(sys, 'frozen', False):
@@ -328,6 +332,44 @@ def init_db():
     # state_meta 记录 mart 表的数据来源版本（做幂等迁移）
     c.execute('CREATE TABLE IF NOT EXISTS state_meta ('
               'key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)')
+    # ---- 排课表：独立表，不写入 state JSON ----
+    # 每天一行 + 每间教室一行，时段用位掩码保存（第 i 位对应第 i 节）。
+    c.execute('CREATE TABLE IF NOT EXISTS schedule_days ('
+              'date TEXT PRIMARY KEY, '
+              'weekday TEXT NOT NULL, '
+              'slots_json TEXT NOT NULL, '
+              'source_name TEXT, source_sha256 TEXT, '
+              'imported_at TEXT NOT NULL, imported_by TEXT, '
+              'room_count INTEGER NOT NULL DEFAULT 0, '
+              'regular_rooms INTEGER NOT NULL DEFAULT 0, '
+              'class_count INTEGER NOT NULL DEFAULT 0, '
+              'borrow_count INTEGER NOT NULL DEFAULT 0, '
+              'exam_count INTEGER NOT NULL DEFAULT 0)')
+    c.execute('CREATE TABLE IF NOT EXISTS schedule_rooms ('
+              'date TEXT NOT NULL, '
+              'name TEXT NOT NULL, '
+              'building TEXT NOT NULL, '
+              'digits TEXT, '
+              'capacity INTEGER, '
+              'special INTEGER NOT NULL DEFAULT 0, '
+              'class_mask INTEGER NOT NULL DEFAULT 0, '
+              'borrow_mask INTEGER NOT NULL DEFAULT 0, '
+              'exam_mask INTEGER NOT NULL DEFAULT 0, '
+              'PRIMARY KEY (date, name))')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sr_date ON schedule_rooms(date)')
+    # 兼容旧库：排课表新增考试类型
+    for tbl, col, ddl in [
+        ('schedule_days', 'regular_rooms', 'ALTER TABLE schedule_days ADD COLUMN regular_rooms INTEGER NOT NULL DEFAULT 0'),
+        ('schedule_days', 'exam_count', 'ALTER TABLE schedule_days ADD COLUMN exam_count INTEGER NOT NULL DEFAULT 0'),
+        ('schedule_rooms', 'exam_mask', 'ALTER TABLE schedule_rooms ADD COLUMN exam_mask INTEGER NOT NULL DEFAULT 0'),
+    ]:
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+    c.execute('UPDATE schedule_days SET regular_rooms = ('
+              'SELECT COUNT(*) FROM schedule_rooms WHERE schedule_rooms.date=schedule_days.date AND special=0'
+              ') WHERE regular_rooms=0')
     # 为报表查询加索引
     for idx_sql in [
         'CREATE INDEX IF NOT EXISTS idx_tm_created ON tickets_mart(created_at)',
@@ -822,6 +864,371 @@ def api_report_pdf(user):
     resp.headers['Content-Disposition'] = "attachment; filename*=UTF-8''%s" % quote(fname)
     resp.headers['Cache-Control'] = 'no-store'
     return resp
+
+
+# ---------- 排课查询（独立表 / 独立接口，不写 state JSON） ----------
+SCHEDULE_DIR = os.path.join(os.path.dirname(os.path.abspath(DB)), 'schedules')
+SCHEDULE_MAX_FILE = 20 * 1024 * 1024       # 单个 PDF / ZIP 20MB
+SCHEDULE_MAX_TOTAL = 80 * 1024 * 1024      # 一次上传合计 80MB
+SCHEDULE_MAX_FILES = 40                    # 一次最多 40 个 PDF
+
+
+def _schedule_date(value):
+    """校验 YYYY-MM-DD，返回 date；非法返回 None。"""
+    try:
+        d = datetime.date.fromisoformat(str(value or '').strip())
+    except ValueError:
+        return None
+    if not (2000 <= d.year <= 2100):
+        return None
+    return d
+
+
+def _schedule_mask(values, kind):
+    mask = 0
+    for i, v in enumerate(values or []):
+        if v == kind:
+            mask |= (1 << i)
+    return mask
+
+
+def _schedule_slots(class_mask, borrow_mask, exam_mask, count):
+    out = []
+    for i in range(count):
+        if class_mask & (1 << i):
+            out.append('class')
+        elif exam_mask & (1 << i):
+            out.append('exam')
+        elif borrow_mask & (1 << i):
+            out.append('borrow')
+        else:
+            out.append(None)
+    return out
+
+
+def _schedule_minutes(slots, rooms):
+    """按普通教室累计上课/考试/借用分钟数；特殊行不计入，与空闲统计口径一致。"""
+    class_minutes = borrow_minutes = exam_minutes = 0
+    n = len(slots)
+    for r in rooms:
+        if r['special']:
+            continue
+        class_mask = int(r['class_mask'] or 0)
+        borrow_mask = int(r['borrow_mask'] or 0)
+        exam_mask = int(r['exam_mask'] or 0) if 'exam_mask' in r.keys() else 0
+        for i in range(n):
+            mins = int((slots[i] or {}).get('minutes') or 45)
+            if class_mask & (1 << i):
+                class_minutes += mins
+            elif exam_mask & (1 << i):
+                exam_minutes += mins
+            elif borrow_mask & (1 << i):
+                borrow_minutes += mins
+    return class_minutes, borrow_minutes, exam_minutes
+
+
+def _schedule_cleanup(paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _schedule_upload_entries(files):
+    """把上传的 PDF / ZIP 展开成 [(显示文件名, 临时路径)]，并做大小与数量限制。"""
+    os.makedirs(SCHEDULE_DIR, exist_ok=True)
+    entries = []
+    total = 0
+    for f in files:
+        name = os.path.basename(f.filename or '')
+        if not name:
+            continue
+        if len(entries) >= SCHEDULE_MAX_FILES:
+            raise ValueError('一次最多上传 %d 个 PDF' % SCHEDULE_MAX_FILES)
+        data = f.read(SCHEDULE_MAX_FILE + 1)
+        if len(data) > SCHEDULE_MAX_FILE:
+            raise ValueError('%s 超过 20MB' % name)
+        total += len(data)
+        if total > SCHEDULE_MAX_TOTAL:
+            raise ValueError('一次上传合计不能超过 80MB')
+        lower = name.lower()
+        if lower.endswith('.pdf'):
+            fd, tmp = tempfile.mkstemp(prefix='sch_', suffix='.pdf', dir=SCHEDULE_DIR)
+            with os.fdopen(fd, 'wb') as out:
+                out.write(data)
+            entries.append((name, tmp))
+        elif lower.endswith('.zip'):
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(data))
+            except zipfile.BadZipFile:
+                raise ValueError('%s 不是有效的 ZIP 文件' % name)
+            for info in zf.infolist():
+                if info.is_dir() or not info.filename.lower().endswith('.pdf'):
+                    continue
+                if len(entries) >= SCHEDULE_MAX_FILES:
+                    raise ValueError('ZIP 内 PDF 超过 %d 个' % SCHEDULE_MAX_FILES)
+                if info.file_size > SCHEDULE_MAX_FILE:
+                    raise ValueError('%s 内的 %s 超过 20MB' % (name, info.filename))
+                fd, tmp = tempfile.mkstemp(prefix='sch_', suffix='.pdf', dir=SCHEDULE_DIR)
+                with os.fdopen(fd, 'wb') as out:
+                    out.write(zf.read(info))
+                entries.append((os.path.basename(info.filename), tmp))
+        else:
+            raise ValueError('只支持 PDF 或 ZIP：%s' % name)
+    if not entries:
+        raise ValueError('压缩包内没有 PDF 文件')
+    return entries
+
+
+@app.route('/api/schedule/preview', methods=['POST'])
+@require_auth
+@require_perm('settings')
+def api_schedule_preview(user):
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': '请选择排课表 PDF 或 ZIP'}), 400
+    try:
+        entries = _schedule_upload_entries(files)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    import schedule_parser
+    out = []
+    conn = get_db()
+    try:
+        for name, path in entries:
+            try:
+                data = schedule_parser.parse_schedule_pdf(path)
+                row = conn.execute(
+                    'SELECT imported_at, imported_by FROM schedule_days WHERE date=?',
+                    (data['date'],)).fetchone()
+                out.append({
+                    'name': name, 'ok': True,
+                    'date': data['date'], 'weekday': data['weekday'],
+                    'summary': data['summary'],
+                    'exists': bool(row),
+                    'existing': ({'imported_at': row['imported_at'], 'imported_by': row['imported_by']}
+                                 if row else None),
+                })
+            except schedule_parser.ScheduleParseError as e:
+                out.append({'name': name, 'ok': False, 'error': str(e)})
+            except Exception as e:
+                out.append({'name': name, 'ok': False, 'error': '解析失败：%s' % e})
+    finally:
+        conn.close()
+        _schedule_cleanup([p for _, p in entries])
+    return jsonify({'files': out})
+
+
+@app.route('/api/schedule/import', methods=['POST'])
+@require_auth
+@require_perm('settings')
+def api_schedule_import(user):
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': '请选择排课表 PDF 或 ZIP'}), 400
+    replace = str(request.form.get('replace') or '').lower() in ('1', 'true', 'yes', 'on')
+    try:
+        entries = _schedule_upload_entries(files)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    import schedule_parser
+    items, errors = [], []
+    for name, path in entries:
+        try:
+            items.append((name, path, schedule_parser.parse_schedule_pdf(path)))
+        except schedule_parser.ScheduleParseError as e:
+            errors.append({'name': name, 'error': str(e)})
+        except Exception as e:
+            errors.append({'name': name, 'error': '解析失败：%s' % e})
+    if errors:
+        _schedule_cleanup([p for _, p in entries])
+        return jsonify({'error': '有文件解析失败，未导入任何数据', 'files': errors}), 400
+
+    seen = {}
+    for name, path, data in items:
+        if data['date'] in seen:
+            _schedule_cleanup([p for _, p in entries])
+            return jsonify({'error': '同一批文件里出现重复日期 %s（%s / %s）'
+                                     % (data['date'], seen[data['date']], name)}), 400
+        seen[data['date']] = name
+
+    conn = get_db()
+    try:
+        conflicts = [d for d in seen
+                     if conn.execute('SELECT 1 FROM schedule_days WHERE date=?', (d,)).fetchone()]
+        if conflicts and not replace:
+            conn.close()
+            _schedule_cleanup([p for _, p in entries])
+            return jsonify({'error': '以下日期已存在，如需覆盖请确认', 'conflicts': sorted(conflicts)}), 409
+
+        imported = []
+        for name, path, data in items:
+            date = data['date']
+            slots = data['slots']
+            conn.execute('DELETE FROM schedule_rooms WHERE date=?', (date,))
+            conn.execute('DELETE FROM schedule_days WHERE date=?', (date,))
+            conn.execute(
+                'INSERT INTO schedule_days (date, weekday, slots_json, source_name, source_sha256, '
+                'imported_at, imported_by, room_count, regular_rooms, class_count, borrow_count, exam_count) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                (date, data['weekday'], json.dumps(slots, ensure_ascii=False), name,
+                 data['source_sha256'], time.strftime('%Y-%m-%dT%H:%M:%S'), user,
+                 data['summary']['rooms'], data['summary'].get('regular_rooms', 0),
+                 data['summary']['class_count'], data['summary']['borrow_count'],
+                 data['summary'].get('exam_count', 0)))
+            for r in data['rooms']:
+                conn.execute(
+                    'INSERT INTO schedule_rooms (date, name, building, digits, capacity, special, '
+                    'class_mask, borrow_mask, exam_mask) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (date, r['name'], r['building'], r['digits'], r['capacity'],
+                     1 if r['special'] else 0,
+                     _schedule_mask(r['slots'], 'class'), _schedule_mask(r['slots'], 'borrow'),
+                     _schedule_mask(r['slots'], 'exam')))
+            try:
+                shutil.copyfile(path, os.path.join(SCHEDULE_DIR, date + '.pdf'))
+            except Exception as e:
+                raise RuntimeError('保存原始 PDF 失败：%s' % e)
+            imported.append({'date': date, 'weekday': data['weekday'], 'summary': data['summary']})
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        _schedule_cleanup([p for _, p in entries])
+        return jsonify({'error': '导入失败，本次修改已回滚：%s' % e}), 500
+    conn.close()
+    _schedule_cleanup([p for _, p in entries])
+    audit_write(user, '数据', '导入排课表', '、'.join(i['date'] for i in imported),
+                '共 %d 天；%s' % (len(imported), '；'.join(
+                    '%s：%d 间教室，课 %d，借 %d，考 %d' % (i['date'], i['summary']['rooms'],
+                                                          i['summary']['class_count'],
+                                                          i['summary']['borrow_count'],
+                                                          i['summary'].get('exam_count', 0))
+                    for i in imported)))
+    return jsonify({'ok': True, 'imported': imported, 'replaced': sorted(conflicts)})
+
+
+@app.route('/api/schedule/days', methods=['GET'])
+@require_auth
+def api_schedule_days(user):
+    d1 = _schedule_date(request.args.get('from'))
+    d2 = _schedule_date(request.args.get('to'))
+    if not d1 or not d2:
+        return jsonify({'error': '请提供 from / to（YYYY-MM-DD）'}), 400
+    if d2 < d1:
+        return jsonify({'error': '结束日期不能早于开始日期'}), 400
+    if (d2 - d1).days > 400:
+        return jsonify({'error': '查询区间不能超过 400 天'}), 400
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT date, weekday, room_count, regular_rooms, class_count, borrow_count, exam_count, '
+        'slots_json, imported_at, imported_by '
+        'FROM schedule_days WHERE date BETWEEN ? AND ? ORDER BY date', (d1.isoformat(), d2.isoformat())).fetchall()
+    rrows = conn.execute(
+        'SELECT date, special, class_mask, borrow_mask, exam_mask FROM schedule_rooms '
+        'WHERE date BETWEEN ? AND ?', (d1.isoformat(), d2.isoformat())).fetchall()
+    used_row = conn.execute(
+        'SELECT COUNT(DISTINCT name) FROM schedule_rooms '
+        'WHERE date BETWEEN ? AND ? AND special=0 AND (class_mask<>0 OR borrow_mask<>0 OR exam_mask<>0)',
+        (d1.isoformat(), d2.isoformat())).fetchone()
+    room_row = conn.execute(
+        'SELECT MAX(regular_rooms) FROM schedule_days WHERE date BETWEEN ? AND ?',
+        (d1.isoformat(), d2.isoformat())).fetchone()
+    conn.close()
+    by_date = {}
+    for r in rrows:
+        by_date.setdefault(r['date'], []).append(r)
+    days = []
+    for r in rows:
+        slots = json.loads(r['slots_json'] or '[]')
+        class_minutes, borrow_minutes, exam_minutes = _schedule_minutes(slots, by_date.get(r['date'], []))
+        item = dict(r)
+        item.pop('slots_json', None)
+        item['class_minutes'] = class_minutes
+        item['borrow_minutes'] = borrow_minutes
+        item['exam_minutes'] = exam_minutes
+        item['total_minutes'] = class_minutes + borrow_minutes + exam_minutes
+        days.append(item)
+    return jsonify({'days': days, 'summary': {
+        'used_rooms': int(used_row[0] or 0),
+        'available_rooms': int(room_row[0] or 0)
+    }})
+
+
+@app.route('/api/schedule/day', methods=['GET'])
+@require_auth
+def api_schedule_day(user):
+    d = _schedule_date(request.args.get('date'))
+    if not d:
+        return jsonify({'error': '日期格式应为 YYYY-MM-DD'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT * FROM schedule_days WHERE date=?', (d.isoformat(),)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': '该日期还没有导入排课表', 'not_imported': True}), 404
+    db_rooms = conn.execute(
+        'SELECT name, building, digits, capacity, special, class_mask, borrow_mask, exam_mask '
+        'FROM schedule_rooms WHERE date=? '
+        'ORDER BY special, CASE building WHEN \'一教\' THEN 0 WHEN \'二教\' THEN 1 ELSE 2 END, '
+        'CAST(digits AS INTEGER), name', (d.isoformat(),)).fetchall()
+    conn.close()
+    slots = json.loads(row['slots_json'] or '[]')
+    n = len(slots)
+    class_minutes, borrow_minutes, exam_minutes = _schedule_minutes(slots, db_rooms)
+    rooms = [{
+        'name': r['name'], 'building': r['building'], 'digits': r['digits'],
+        'capacity': r['capacity'], 'special': bool(r['special']),
+        'slots': _schedule_slots(r['class_mask'], r['borrow_mask'], r['exam_mask'], n),
+    } for r in db_rooms]
+    return jsonify({
+        'date': row['date'], 'weekday': row['weekday'], 'slots': slots,
+        'summary': {'rooms': row['room_count'], 'regular_rooms': row['regular_rooms'],
+                    'class_count': row['class_count'], 'borrow_count': row['borrow_count'],
+                    'exam_count': row['exam_count'],
+                    'class_minutes': class_minutes, 'borrow_minutes': borrow_minutes,
+                    'exam_minutes': exam_minutes,
+                    'total_minutes': class_minutes + borrow_minutes + exam_minutes},
+        'source': {'name': row['source_name'], 'imported_at': row['imported_at'],
+                   'imported_by': row['imported_by']},
+        'rooms': rooms,
+    })
+
+
+@app.route('/api/schedule/day', methods=['DELETE'])
+@require_auth
+@require_perm('settings')
+def api_schedule_day_delete(user):
+    d = _schedule_date(request.args.get('date'))
+    if not d:
+        return jsonify({'error': '日期格式应为 YYYY-MM-DD'}), 400
+    conn = get_db()
+    row = conn.execute('SELECT date FROM schedule_days WHERE date=?', (d.isoformat(),)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': '该日期还没有导入排课表'}), 404
+    conn.execute('DELETE FROM schedule_rooms WHERE date=?', (d.isoformat(),))
+    conn.execute('DELETE FROM schedule_days WHERE date=?', (d.isoformat(),))
+    conn.commit()
+    conn.close()
+    try:
+        os.remove(os.path.join(SCHEDULE_DIR, d.isoformat() + '.pdf'))
+    except OSError:
+        pass
+    audit_write(user, '数据', '删除排课表', d.isoformat(), '删除该日排课数据')
+    return jsonify({'ok': True})
+
+
+@app.route('/api/schedule/source', methods=['GET'])
+@require_auth
+def api_schedule_source(user):
+    d = _schedule_date(request.args.get('date'))
+    if not d:
+        return jsonify({'error': '日期格式应为 YYYY-MM-DD'}), 400
+    path = os.path.join(SCHEDULE_DIR, d.isoformat() + '.pdf')
+    if not os.path.isfile(path):
+        return jsonify({'error': '原始 PDF 不存在'}), 404
+    return send_file(path, mimetype='application/pdf', as_attachment=True,
+                     download_name='排课表_%s.pdf' % d.isoformat())
 
 
 # ---------- 静态文件 ----------

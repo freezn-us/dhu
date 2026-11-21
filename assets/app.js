@@ -6,7 +6,7 @@
     { group: '概览', items: [['dashboard', '工作台', 'dashboard']] },
     { group: '来电受理', items: [['intake', '来电登记', 'phone']] },
     { group: '日志填报', items: [['daily-log', '每日工作日志', 'calendar'], ['patrol', '巡视管理', 'check']] },
-    { group: '查询与分析', items: [['tickets', '日志查询', 'list'], ['reports', '统计报表', 'chart']] },
+    { group: '查询与分析', items: [['tickets', '日志查询', 'list'], ['reports', '统计报表', 'chart'], ['schedule', '排课查询', 'calendar']] },
     { group: '资产与知识', items: [['assets', '教室/设备档案', 'server'], ['kb', '知识库', 'book']] },
     { group: '数据与配置', items: [['data', '导入 / 导出', 'database'], ['settings', '基础配置', 'settings']] },
     { group: '帮助', items: [['help', '使用说明', 'file']] },
@@ -15,7 +15,7 @@
   var TITLES = {
     dashboard: ['概览', '工作台'], intake: ['来电受理', '来电登记'],
     'daily-log': ['日志填报', '每日工作日志'], 'log-entry': ['日志填报', '单条日志录入'], patrol: ['日志填报', '巡视管理'],
-    tickets: ['查询与分析', '日志查询'], reports: ['查询与分析', '统计报表'],
+    tickets: ['查询与分析', '日志查询'], reports: ['查询与分析', '统计报表'], schedule: ['查询与分析', '排课查询'],
     assets: ['资产与知识', '教室/设备档案'], kb: ['资产与知识', '知识库'],
     data: ['数据与配置', '导入 / 导出'], settings: ['数据与配置', '基础配置'], help: ['帮助', '使用说明'],
     'user-manage': ['系统管理', '用户与权限'], audit: ['系统管理', '审计日志']
@@ -25,7 +25,7 @@
     dashboard: 'dashboard', intake: 'intake', 'daily-log': 'daily-log',
     'log-entry': 'log-entry', patrol: 'patrol', tickets: 'tickets',
     reports: 'reports', data: 'data', settings: 'settings', help: 'help',
-    assets: 'assets', kb: 'kb',
+    assets: 'assets', kb: 'kb', schedule: 'dashboard',
     'user-manage': 'user-manage', audit: 'audit'
   };
   window.currentRoute = 'dashboard';

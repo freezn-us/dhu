@@ -3473,7 +3473,14 @@
   }
   function handleApiResp(res) {
     if (res.status === 401) { setToken(''); sessionUser = null; throw new Error('未登录或会话已过期'); }
-    if (!res.ok) return res.json().then(function (d) { throw new Error(d.error || ('HTTP ' + res.status)); }, function () { throw new Error('HTTP ' + res.status); });
+    if (!res.ok) return res.json().then(function (d) {
+      var err = new Error(d.error || ('HTTP ' + res.status));
+      err.status = res.status;
+      err.code = d.code;
+      err.not_imported = d.not_imported;
+      err.payload = d;
+      throw err;
+    }, function () { throw new Error('HTTP ' + res.status); });
     return res.json();
   }
 
@@ -3547,6 +3554,37 @@
   }
 
 
+  // ---------- 排课查询（独立表 / 独立接口） ----------
+  function scheduleForm(path, files, extra) {
+    var fd = new FormData();
+    var list = files ? Array.prototype.slice.call(files) : [];
+    list.forEach(function (f) { fd.append('files', f, f.name); });
+    Object.keys(extra || {}).forEach(function (k) { fd.append(k, extra[k]); });
+    return fetch('/api/' + path, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + getToken() },
+      body: fd
+    }).then(handleApiResp);
+  }
+  function schedulePreview(files) { return scheduleForm('schedule/preview', files); }
+  function scheduleImport(files, replace) { return scheduleForm('schedule/import', files, { replace: replace ? '1' : '0' }); }
+  function scheduleDays(from, to) {
+    return apiGet('schedule/days?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to));
+  }
+  function scheduleDay(date) { return apiGet('schedule/day?date=' + encodeURIComponent(date)); }
+  function scheduleDeleteDay(date) { return apiDel('schedule/day?date=' + encodeURIComponent(date)); }
+  function scheduleSource(date) {
+    return fetch('/api/schedule/source?date=' + encodeURIComponent(date), { headers: authHeaders() })
+      .then(function (res) {
+        if (res.status === 401) { setToken(''); sessionUser = null; throw new Error('未登录或会话已过期'); }
+        if (!res.ok) {
+          return res.json().then(function (d) { throw new Error(d.error || ('HTTP ' + res.status)); },
+            function () { throw new Error('HTTP ' + res.status); });
+        }
+        return res.blob();
+      });
+  }
+
   // ---------- 演示数据 / 清空 ----------
   function resetDemo() {
     state = emptyState();
@@ -3611,6 +3649,8 @@
     listGroups: listGroups, createGroup: createGroup, updateGroup: updateGroup, deleteGroup: deleteGroup,
     setGroupPermissions: setGroupPermissions, setGroupMembers: setGroupMembers,
     listDbBackups: listDbBackups, createDbBackup: createDbBackup, restoreDbBackup: restoreDbBackup,
+    schedulePreview: schedulePreview, scheduleImport: scheduleImport, scheduleDays: scheduleDays,
+    scheduleDay: scheduleDay, scheduleDeleteDay: scheduleDeleteDay, scheduleSource: scheduleSource,
     addFaultType: addFaultType, removeFaultType: removeFaultType, renameFaultType: renameFaultType,
     addSymptom: addSymptom, updateSymptom: updateSymptom, removeSymptom: removeSymptom,
     buildFaultDictWorkbook: buildFaultDictWorkbook, previewFaultImport: previewFaultImport, commitFaultImport: commitFaultImport,

@@ -16,7 +16,7 @@
 ## 一、快速开始（开发）
 
 ```bash
-# 依赖：Python 3.11+、flask、cryptography（授权模块）
+# 依赖：Python 3.11+、flask、cryptography（授权模块）、pymupdf（排课表 PDF 解析）
 python server.py
 ```
 
@@ -50,6 +50,7 @@ python server.py
 | 日志填报 | 巡视管理 | 每天自动生成 3 个时段任务，逐项打卡生成巡检日志 |
 | 查询与分析 | 日志查询 | 筛选、详情、编辑、导出 |
 | 查询与分析 | 统计报表 | 区间统计、故障 TOP、楼栋/教室分布、工作量、时效与满意度 |
+| 查询与分析 | 排课查询 | 上传一教/二教《值班记录表》PDF（可多选或 ZIP），月历 + 单日教室×13 时段占用（课/借/考），表头按上午/下午/晚上三段分组；日历顶部汇总可用教室、本月使用过（去重）、使用率、课/借/考节数与时长；管理员或具备「基础配置」权限者可上传 |
 | 资产与知识 | 教室/设备档案 | 教室清单（含区域）、设备台账与保修预警 |
 | 资产与知识 | 知识库 | 故障速查与操作指引 |
 | 数据与配置 | 导入 / 导出 | CSV/XLSX 导入、全量 JSON 备份恢复 |
@@ -112,6 +113,7 @@ SQLite（开发默认 `data/dhu_ops.db`，打包后落 `%ProgramData%\DHU-Ops\`�
 - **业务数据**：`state` 表单行 JSON，含 `settings` / `tickets` / `patrols` / `assets`
 - **报表宽表**：`tickets_mart` / `patrols_mart` / `devices_mart` + 索引，由 `mart_sync()` 从 state 全量同步；服务启动时 `mart_backfill()` 回填
 - **账号体系**：`users` / `sessions` / `user_groups` / `group_members` / `user_permissions` / `group_permissions` / `audit_logs`
+- **排课数据**：`schedule_days`（每天一行，13 个时段 JSON）与 `schedule_rooms`（每间教室的课/借位图），原始 PDF 存 `<数据库目录>/schedules/<date>.pdf`；与业务 state 分离，不参与 `/api/state` 全量读写
 
 并发控制：`state.rev` 乐观锁。GET 下发 `rev`，POST 回带 `baseRev`；不一致返回 **409** 并附最新 state，前端据此刷新后重试。
 
@@ -150,12 +152,13 @@ python tests/ui_selftest.py          # Playwright 端到端
 python tests/test_daily_import.py    # 真实日报导入校验
 ```
 
-共 16 个测试脚本。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
+共 18 个测试/诊断脚本（13 个回归用例 + `ui_selftest.py` + 冒烟/诊查脚本）。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
 
 - 原硬编码旧路径 `d:\pctools win10\dhu` 的 6 个脚本（`test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、`test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`）已全部改为基于 `__file__` 动态解析；旧机器临时 `pylibs` 搜索路径已从全部测试脚本移除，依赖统一由 `.build-venv` 提供。
 - 其中 3 个脚本需要真实日报 xlsx 样本：`test_daily_import.py` / `test_export_format.py` 用 `DHU_TEST_XLSX`（或 `tests/fixtures/daily-log.xlsx`），`test_march_import.py` 用 `DHU_TEST_MARCH_XLSX`（或 `tests/fixtures/march-log.xlsx`）。缺样本时会给出明确提示并退出，不再抛 FileNotFoundError。
 - `tests/test_state_rev.py`：乐观锁与统一错误响应（15 项）。
-- `tests/test_state_perm.py`：服务端权限校验回归（31 项，临时库 + 临时端口，不碰正式数据）。
+- `tests/test_state_perm.py`：服务端权限校验回归（55 项，临时库 + 临时端口，不碰正式数据）。
+- `tests/test_schedule.py`：排课表解析 + 预览/导入/覆盖/查询/删除接口回归（47 项，依赖 `D:\File\AI\class schudel` 样例；缺失时自动跳过）。
 
 ## 十、文档
 
@@ -175,6 +178,8 @@ python tests/test_daily_import.py    # 真实日报导入校验
 - 导入的故障类型必须在字典内（含包含匹配）；工程师不在名单会提示但仍按文本导入
 - 报表以「来电时间」归属统计区间，跨月日志按来电月份计
 - 打印样式仅隐藏导航与操作区，未做分页优化
-- 权限点为**页面级**：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口被工作台依赖，暂未加权限校验
+- 权限点为**页面级**：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口已按 `reports` 权限校验，但工作台依赖的摘要数据仍随 `/api/state` 下发
+- 排课表目前只覆盖一教、二教（160 行：156 间普通教室 + 4 个特殊行）；四教、化工楼、中南楼、机房无数据
+- 排课表只解析「课 / 借」占用状态，不含课程名、教师、借用人；每天需上传一个 PDF，不提供自动抓取
+- 排课表上传依赖 PyMuPDF，安装包体积会增加约 20MB
 - 已建立 git 基线（`main` 分支，忽略规则见 `.gitignore`）；`backups/` 手工快照仍留在磁盘但不纳入版本控制。代码级回滚优先用 `git`，已安装版本的回滚仍用安装目录下「版本回滚.bat」
-"# dhu" 
