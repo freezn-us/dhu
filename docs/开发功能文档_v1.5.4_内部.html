@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>东华大学多媒体教室运维系统 · 开发功能文档（内部）v1.5.4</title>
+<link rel="stylesheet" href="_assets/doc.css">
+</head>
+<body>
+
+<!-- ================= 封面 ================= -->
+<div class="cover page">
+  <div class="cover-top"><span class="cover-logo">DHU</span><span>东华大学信息中心 · 研发参考</span></div>
+  <div class="cover-kicker">Internal Engineering Document</div>
+  <h1>多媒体教室<br>运维系统</h1>
+  <div class="cover-sub">开发功能文档</div>
+  <div class="cover-line"></div>
+  <p class="cover-desc">记录 v1.5.4 的功能实现、数据模型、接口契约与工程取舍，并给出下一阶段的优化清单与优先级建议。</p>
+  <div class="cover-tags">
+    <span class="cover-tag">架构与数据流</span><span class="cover-tag">排课解析</span><span class="cover-tag">接口与权限</span>
+    <span class="cover-tag">测试与发布</span><span class="cover-tag">优化路线</span>
+  </div>
+  <div class="cover-meta">
+    <div>版本　<b>v1.5.4</b></div><div>日期　<b>2026 年 11 月 21 日</b></div>
+    <div>适用范围　<b>研发 / 测试 / 运维</b></div><div>密级　<b>内部资料</b></div>
+  </div>
+  <div class="cover-foot">内部技术文档，包含实现细节与风险判断，请勿对外分发。配套文档：README.md、开发文档.md、docs/api.md。</div>
+</div>
+
+<!-- ================= 文档信息 + 摘要 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">00</span>文档信息与摘要</h1>
+  <table class="compact fixed">
+    <tbody>
+      <tr><th style="width:18%">文档名称</th><td>东华大学多媒体教室运维系统 · 开发功能文档</td><th style="width:14%">版本</th><td>v1.5.4</td></tr>
+      <tr><th>编制</th><td>东华大学信息中心 · 研发</td><th>日期</th><td>2026-11-21</td></tr>
+      <tr><th>适用读者</th><td>研发、测试、实施与运维人员</td><th>密级</th><td>内部</td></tr>
+      <tr><th>覆盖范围</th><td colspan="3">v1.5.4 的功能实现、排课查询、通用授权、PyMuPDF 瘦身、测试与构建；同时给出优化建议。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>摘要</h2>
+  <p>系统是一套面向东华大学松江校区 253 间多媒体教室的垂直运维平台，采用 Flask + SQLite + 原生 JS 单页前端，PyInstaller 打包为 Windows 一键安装包。v1.5.4 在 v1.5.3 排课查询的基础上，补齐了教室筛选、可用/使用过/使用率统计、三时段可视分组与考试类型，并将通用授权、构建门禁和安装器复制纳入发布流程；同时通过自定义 PyInstaller hook 将服务端从 89.1MB 压到约 45.9MB。</p>
+  <p>本版的核心工程判断有三条：<b>排课数据与业务 state 分离</b>，避免把每天新增的位图数据塞进单行 JSON；<b>导入用事务整日替换</b>，保证“要么完整一天、要么完全不动”；<b>统计口径写进接口与页面文案</b>，让“可用 156 / 使用过 135 / 使用率 86.5%”这类数字能被解释，而不是靠口头约定。</p>
+
+  <div class="kpi-grid">
+    <div class="kpi"><b>39</b><span>HTTP 接口（含排课 6 个）</span></div>
+    <div class="kpi"><b>47</b><span>排课解析与接口测试</span></div>
+    <div class="kpi"><b>160</b><span>每日排课行（156 普通 + 4 特殊）</span></div>
+    <div class="kpi"><b>44<small>MiB</small></b><span>服务端可执行文件（瘦身后）</span></div>
+  </div>
+
+  <h2>阅读路径</h2>
+  <div class="grid-3">
+    <div class="card soft"><span class="n">NEW</span><h4>第一次接触项目</h4><p>先读第 1、2 章建立整体架构，再读第 3 章功能地图；排课部分直接看第 4 章。</p></div>
+    <div class="card soft"><span class="n">DEV</span><h4>接手排课模块</h4><p>第 4 章的解析流程、位图模型、接口契约和测试用例是完整入口。</p></div>
+    <div class="card soft"><span class="n">OPS</span><h4>负责发布与现场</h4><p>第 8 章的构建、冒烟、回滚清单，以及第 9 章的风险与优化优先级。</p></div>
+  </div>
+</div>
+
+<!-- ================= 目录 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">CONTENTS</span>目录</h1>
+  <div class="toc">
+    <div class="toc-grid">
+      <div>
+        <div class="toc-item"><span class="toc-no">01</span><span><span class="toc-title">版本范围与交付物</span><br><span class="toc-sub">v1.5.4 改了什么、产物在哪</span></span></div>
+        <div class="toc-item"><span class="toc-no">02</span><span><span class="toc-title">系统定位与总体架构</span><br><span class="toc-sub">技术栈、部署形态、数据流</span></span></div>
+        <div class="toc-item"><span class="toc-no">03</span><span><span class="toc-title">功能地图与模块实现</span><br><span class="toc-sub">八个分组、关键文件、实现亮点</span></span></div>
+        <div class="toc-item"><span class="toc-no">04</span><span><span class="toc-title">排课查询实现详解</span><br><span class="toc-sub">解析、表结构、接口、统计、前端</span></span></div>
+        <div class="toc-item"><span class="toc-no">05</span><span><span class="toc-title">v1.5.4 关键变更</span><br><span class="toc-sub">通用授权、教室筛选、体积优化</span></span></div>
+      </div>
+      <div>
+        <div class="toc-item"><span class="toc-no">06</span><span><span class="toc-title">关键机制与数据契约</span><br><span class="toc-sub">state、乐观锁、权限、审计、会话</span></span></div>
+        <div class="toc-item"><span class="toc-no">07</span><span><span class="toc-title">测试与质量</span><br><span class="toc-sub">矩阵、命令、结果、缺口</span></span></div>
+        <div class="toc-item"><span class="toc-no">08</span><span><span class="toc-title">构建、发布与回滚</span><br><span class="toc-sub">版本、打包、冒烟、回滚</span></span></div>
+        <div class="toc-item"><span class="toc-no">09</span><span><span class="toc-title">优化与改进建议</span><br><span class="toc-sub">P1/P2/P3 清单、路线图、验收</span></span></div>
+        <div class="toc-item"><span class="toc-no">10</span><span><span class="toc-title">附录</span><br><span class="toc-sub">接口速查、文件地图、术语</span></span></div>
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    <div class="t">文档约定</div>
+    <p>“必须”表示当前实现已依赖的硬约束；“建议”表示可排期的改进；“P1/P2/P3”分别对应下一迭代、季度内、长期。所有路径以项目根 <span class="mono">D:\File\AI\dhu</span> 为基准。</p>
+  </div>
+
+  <h2>配套资料</h2>
+  <div class="grid-3">
+    <div class="card soft"><span class="n">DOC</span><h4>README.md / 开发文档.md</h4><p>部署、升级、接口与历次变更的完整记录；本册是面向研发的“v1.5.4 切片”。</p></div>
+    <div class="card soft"><span class="n">API</span><h4>docs/api.md</h4><p>39 个接口的请求、权限与字段说明，排课接口单独分组。</p></div>
+    <div class="card soft"><span class="n">TEST</span><h4>tests/ 与 releases/</h4><p>19 个测试脚本、安装包、归档与回滚脚本；发布前从这里取证据。</p></div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">01</span>版本范围与交付物</h1>
+  <p class="lead">v1.5.4 是一次“功能增强 + 交付工程”版本：排课查询从“能看”推进到“能按教室查、能按三时段看、能统计使用率”，同时把通用授权、构建门禁和安装包体积纳入可重复的发布流程。</p>
+
+  <h2>1.1 版本范围</h2>
+  <table>
+    <thead><tr><th style="width:16%">类别</th><th>内容</th><th style="width:26%">主要文件</th></tr></thead>
+    <tbody>
+      <tr><td>排课查询</td><td>PDF 解析、月历、日视图、三时段分组、教室筛选、课/借/考、可用/使用过/使用率、原始 PDF 下载与删除</td><td><span class="mono">schedule_parser.py</span>、<span class="mono">server.py</span>、<span class="mono">assets/views-schedule.js</span></td></tr>
+      <tr><td>通用授权</td><td>构建时签发 <span class="mono">machine="*"</span>、构建日 +1 年；安装器不覆盖已有授权；打包版不自动生成试用；启用账号上限 20</td><td><span class="mono">license_key.py</span>、<span class="mono">build_release.ps1</span>、<span class="mono">installer_gui.py</span></td></tr>
+      <tr><td>体积优化</td><td>自定义 PyMuPDF hook，排除 layout/ONNX 与 mupdf-devel；服务端 89.1MB → 45.9MB</td><td><span class="mono">tools/pyi_hooks/hook-pymupdf.py</span></td></tr>
+      <tr><td>构建修复</td><td>PowerShell 5.1 UTF-8 BOM；PyInstaller stderr 与 <span class="mono">$ErrorActionPreference=Stop</span> 冲突</td><td><span class="mono">build_release.ps1</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>1.2 交付物</h2>
+  <table class="compact">
+    <thead><tr><th style="width:34%">文件</th><th>说明</th><th style="width:20%">大小</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">releases/东华大学多媒体教室运维系统_v1.5.4_一键安装包.zip</span></td><td>客户交付的一键安装包</td><td>118.6 MiB</td></tr>
+      <tr><td><span class="mono">releases/v1.5.4/DHU-Ops-Setup.exe</span></td><td>安装程序（内嵌 server 与 launcher）</td><td>68.2 MiB</td></tr>
+      <tr><td><span class="mono">releases/v1.5.4/dhu-ops-server.exe</span></td><td>服务端，可独立启动</td><td>43.8 MiB</td></tr>
+      <tr><td><span class="mono">releases/v1.5.4/license.json</span></td><td>构建时签发的通用授权</td><td>—</td></tr>
+      <tr><td><span class="mono">开发文档.md</span></td><td>D1/D2/S2a/S1a/S1b、排课与 v1.5.4 技术记录</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h2>1.3 与既有文档的关系</h2>
+  <p><span class="mono">README.md</span> 面向开发与实施，说明启动、配置、权限、数据存储与已知限制；<span class="mono">开发文档.md</span> 记录 2026-11-17 的 P0 修复与后续排课/授权实现细节；<span class="mono">docs/api.md</span> 由脚本静态生成，列出 39 个接口及权限；本文档把三者串成“功能—实现—风险”的完整视图，并补充优化建议。</p>
+</div>
+
+<!-- ================= 02 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">02</span>系统定位与总体架构</h1>
+  <p class="lead">系统不是通用的 ITSM，也不是纯前端工具。它的边界很明确：一台 Windows 机器（或局域网内一台服务器）承载 Flask 服务与 SQLite 数据，用户通过浏览器访问；安装包负责把运行环境、服务、快捷方式和开机启动一起交付。</p>
+
+  <h2>2.1 总体架构</h2>
+  <div class="arch">
+    <div class="arch-row">
+      <div class="arch-box"><b>浏览器（PC / 手机）</b>原生 JS 单页应用；hash 路由；按需加载 xlsx/jspdf；localStorage 仅存 token 与少量偏好</div>
+      <div class="arch-box"><b>桌面启动器</b>Edge/Chrome <span class="mono">--app</span> 窗口；服务未启动时先拉起 server.exe</div>
+      <div class="arch-box"><b>安装器</b>复制程序、写 access.txt/port.txt、建数据目录、计划任务、防火墙、复制通用授权</div>
+    </div>
+    <div class="arch-arrow">↓ HTTP / JSON（同源，Bearer token）</div>
+    <div class="arch-row">
+      <div class="arch-box dark" style="flex:2"><b>Flask 应用（server.py）</b>路由与参数校验 → 鉴权/授权/授权门 → 业务逻辑 → SQLite 事务；统一 JSON 错误处理</div>
+      <div class="arch-box teal"><b>启动与运维</b>端口/监听决策、初始化 DB、迁移、备份、<span class="mono">--reset-admin</span></div>
+    </div>
+    <div class="arch-arrow">↓ sqlite3（每请求连接，显式事务）</div>
+    <div class="arch-row">
+      <div class="arch-box"><b>业务 state</b>单行 JSON：settings / tickets / patrols / assets；<span class="mono">rev</span> 乐观锁</div>
+      <div class="arch-box"><b>报表宽表</b>tickets_mart / patrols_mart / devices_mart；由 mart_sync 全量同步</div>
+      <div class="arch-box"><b>排课表</b>schedule_days / schedule_rooms；位图存课/借/考；原 PDF 落盘</div>
+      <div class="arch-box"><b>账号与审计</b>users / sessions / 组与权限 / audit_logs</div>
+    </div>
+    <div class="arch-arrow">↓ 文件系统</div>
+    <div class="arch-row">
+      <div class="arch-box teal"><b>数据目录</b>开发 <span class="mono">data/</span>；安装后 <span class="mono">%ProgramData%\DHU-Ops\</span>：DB、backups、schedules、初始密码文件</div>
+      <div class="arch-box"><b>静态资源</b>index.html + assets/ + vendor/；JS/CSS/HTML 响应 <span class="mono">no-store</span></div>
+    </div>
+  </div>
+
+  <h2>2.2 技术栈与取舍</h2>
+  <table class="compact">
+    <thead><tr><th style="width:18%">层</th><th style="width:26%">选型</th><th>取舍理由</th></tr></thead>
+    <tbody>
+      <tr><td>后端</td><td>Python 3.11 + Flask 3.1</td><td>团队熟悉、依赖少、打包成熟；单机/局域网规模足够。生产环境仍用 Flask 内置服务器，是已知待改项。</td></tr>
+      <tr><td>数据库</td><td>SQLite</td><td>零运维、单文件、随安装包交付；写并发低。全量 JSON + 宽表的组合适合“读多写少、报表复杂”的场景。</td></tr>
+      <tr><td>前端</td><td>原生 JS（IIFE）</td><td>无 Node 构建链，现场可直接改、直接发；代价是模块化和类型检查缺失。</td></tr>
+      <tr><td>PDF 解析</td><td>PyMuPDF</td><td>文本型 PDF 可按坐标稳定取词，不依赖 OCR；打包体积通过 hook 控制。</td></tr>
+      <tr><td>打包</td><td>PyInstaller onefile + Inno 风格自绘安装器</td><td>客户现场只需一个 exe；服务端、启动器、安装器分三个产物，便于回滚。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2.3 部署形态</h2>
+  <div class="grid-2">
+    <div class="card"><h4>单机模式（默认）</h4><p>server 仅监听 127.0.0.1，安装在同一台值班电脑；桌面快捷方式直接打开本机页面。适合值班室单机使用。</p></div>
+    <div class="card"><h4>局域网模式</h4><p>安装时勾选“允许局域网访问”，写 <span class="mono">access.txt=lan</span>，监听 0.0.0.0；防火墙仅放行专用网络 + 本地子网，其他电脑用服务器 IP 访问。</p></div>
+  </div>
+  <p class="note">旧部署升级时，若目标目录已有数据库且没有 access.txt，安装器默认保持 0.0.0.0，避免升级后局域网用户失联；全新安装默认仅本机。</p>
+
+  <h2>2.4 代码结构</h2>
+  <table class="compact">
+    <thead><tr><th style="width:24%">路径</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">server.py</span></td><td>全部 HTTP 接口、DB 初始化/迁移、鉴权与权限、备份、报表 SQL、排课接口、启动入口</td></tr>
+      <tr><td><span class="mono">schedule_parser.py</span></td><td>《值班记录表》PDF 坐标解析；不依赖 Flask，可单独测试</td></tr>
+      <tr><td><span class="mono">license_key.py</span></td><td>RSA 公钥验证、机器码、试用/宽限、通用授权 <span class="mono">*</span></td></tr>
+      <tr><td><span class="mono">installer_gui.py</span></td><td>安装/卸载、服务注册、防火墙、access.txt、授权文件复制</td></tr>
+      <tr><td><span class="mono">launcher.py</span></td><td>启动服务并以应用窗口打开页面</td></tr>
+      <tr><td><span class="mono">assets/</span></td><td>store.js（数据与保存队列）、app.js（路由/启动）、views-*.js（页面）、styles.css</td></tr>
+      <tr><td><span class="mono">tests/</span></td><td>19 个测试/诊断脚本，覆盖接口、UI、解析、授权、导入</td></tr>
+      <tr><td><span class="mono">tools/</span></td><td>签发授权、资产压缩、版本信息、PyInstaller hook</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ================= 03 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">03</span>功能地图与模块实现</h1>
+  <p class="lead">系统按八个导航分组组织功能，后端以 <span class="mono">/api/*</span> 提供统一 JSON 接口，前端以 hash 路由切换视图。权限点既是菜单显隐依据，也是服务端写操作的校验依据。</p>
+
+  <h2>3.1 功能与实现映射</h2>
+  <table class="compact">
+    <thead><tr><th style="width:16%">模块</th><th style="width:22%">主要能力</th><th style="width:26%">关键实现</th><th>权限/说明</th></tr></thead>
+    <tbody>
+      <tr><td>工作台</td><td>今日指标、教室状态墙、14 天趋势、待办、动态、快捷操作</td><td><span class="mono">views-dashboard.js</span>、<span class="mono">/api/state</span> 派生</td><td>dashboard；所有登录用户</td></tr>
+      <tr><td>来电登记</td><td>登记、推荐工程师、生成 WL 编号、SLA</td><td><span class="mono">views-intake.js</span>、<span class="mono">Store.createTicket</span></td><td>intake；写 tickets 域</td></tr>
+      <tr><td>每日工作日志</td><td>三时段表格、新增、批量、快捷短语、导出打印</td><td><span class="mono">views-daily-log.js</span>、字段白名单</td><td>daily-log / log-entry；当天可编辑</td></tr>
+      <tr><td>巡视管理</td><td>自动生成 3 时段任务、6 项检查、异常转报修、逾期自动完成</td><td><span class="mono">views-patrol.js</span>、<span class="mono">ensurePatrols</span></td><td>patrol；写 patrols 域</td></tr>
+      <tr><td>日志查询</td><td>组合筛选、详情、编辑、导出</td><td><span class="mono">views-tickets.js</span></td><td>tickets / daily-log</td></tr>
+      <tr><td>统计报表</td><td>6 个 JSON 报表 + PDF + Excel/CSV</td><td><span class="mono">report_*</span> SQL、<span class="mono">report_pdf.py</span></td><td>reports；报表接口强制校验</td></tr>
+      <tr><td>排课查询</td><td>PDF 导入、月历、日视图、三时段、教室筛选、考试</td><td><span class="mono">schedule_parser.py</span>、<span class="mono">views-schedule.js</span></td><td>查看全员；上传/删除需 settings</td></tr>
+      <tr><td>资产与知识</td><td>教室/设备台账、保修预警、知识文章</td><td><span class="mono">views-assets.js</span>、<span class="mono">views-kb.js</span></td><td>assets / kb</td></tr>
+      <tr><td>数据与配置</td><td>导入导出、备份恢复、教室/故障/工程师/排班/巡视标准</td><td><span class="mono">views-data.js</span>、<span class="mono">views-settings.js</span></td><td>data / settings</td></tr>
+      <tr><td>系统管理</td><td>账号、用户组、权限点、审计检索</td><td><span class="mono">views-user-manage.js</span>、<span class="mono">views-audit.js</span></td><td>仅管理员（user-manage / audit）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3.2 关键实现亮点</h2>
+  <div class="grid-2">
+    <div class="card"><span class="n">01</span><h4>保存事务同成同败</h4><p>D1 修复把 state JSON 与三张 mart 表放进同一事务；mart_sync 不再自行 commit。失败返回 500 并回滚，前端保留快照、指数退避重试，避免“界面显示成功、数据其实没写”。</p></div>
+    <div class="card"><span class="n">02</span><h4>权限从菜单走到接口</h4><p>报表 6 个 JSON、CSV、审计上报全部加权限校验；<span class="mono">/api/state</span> 按发生变化的顶层域校验，越权 403 且不写库。权限点不再只是“隐藏菜单”。</p></div>
+    <div class="card"><span class="n">03</span><h4>排课数据独立建模</h4><p>不写入 state，单独两张表 + 位图；导入整日事务、原 PDF 留档、sha256 可追溯。避免每天新增的 160 行数据放大全量 JSON 的读写成本。</p></div>
+    <div class="card"><span class="n">04</span><h4>可验证的交付工程</h4><p>47 项排课测试、13 项通用授权测试、55 项权限回归、95 项 UI 冒烟；打包后对 exe 做 health/preview/授权冒烟，不只验证源码。</p></div>
+  </div>
+
+  <h2>3.3 用户角色与典型路径</h2>
+  <table class="compact">
+    <thead><tr><th style="width:18%">角色</th><th style="width:30%">典型操作</th><th>建议权限</th></tr></thead>
+    <tbody>
+      <tr><td>值班员</td><td>来电登记 → 日志填报 → 巡视打卡 → 查排课</td><td>dashboard / intake / daily-log / log-entry / patrol / tickets</td></tr>
+      <tr><td>工程师</td><td>接单处理 → 写处理结果 → 查知识库 → 看自己的工作量</td><td>daily-log / log-entry / tickets / kb；按需 patrol</td></tr>
+      <tr><td>值班负责人</td><td>看报表、审日志、导出周报、维护排班</td><td>reports / tickets / settings / data</td></tr>
+      <tr><td>系统管理员</td><td>账号与权限、基础配置、审计、备份恢复</td><td>全部 + user-manage / audit</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3.4 读代码的顺序</h2>
+  <ol class="tight">
+    <li>先看 <span class="mono">server.py</span> 的 <span class="mono">init_db()</span> 与路由表，建立“表—接口—权限”的整体地图。</li>
+    <li>再看 <span class="mono">assets/store.js</span> 的 <span class="mono">load/save/postState</span>，理解前端如何持有一份 state 并处理 409。</li>
+    <li>排课模块从 <span class="mono">schedule_parser.py</span> 的 <span class="mono">parse_schedule_pdf()</span> 读起，再对照 <span class="mono">api_schedule_day/api_schedule_days</span> 与 <span class="mono">views-schedule.js</span>。</li>
+    <li>最后看 <span class="mono">tests/test_schedule.py</span> 与 <span class="mono">test_state_perm.py</span>，用测试反推边界条件。</li>
+  </ol>
+</div>
+
+<!-- ================= 04 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">04</span>排课查询实现详解</h1>
+  <p class="lead">排课模块是本版最重的功能。它的难点不在页面，而在“把一张人看的 PDF 表，稳定地变成机器可查询的位图”，并把统计口径固定下来。</p>
+
+  <h2>4.1 范围与约束</h2>
+  <ul class="tight">
+    <li>只覆盖《东华大学松江校区值班记录表》中实际存在的一教、二教：每个 PDF 160 行，其中 156 间普通教室（<span class="mono">松1xxx / 松2xxx</span>）+ 4 个特殊行（<span class="mono">1号学院楼同传室</span>、<span class="mono">待定</span>、<span class="mono">松1254(不使用)</span>、<span class="mono">松江体育馆电化</span>）。</li>
+    <li>只解析占用状态「课 / 借 / 考」；不解析课程名、教师、借用人。四教、化工楼、中南楼、机房暂无数据。</li>
+    <li>每天一个 PDF（可多页），不做自动抓取；同日重复导入默认拒绝，显式覆盖才替换。</li>
+    <li>数据与业务 state 分离：不写入 <span class="mono">/api/state</span>，避免全量 JSON 放大。</li>
+  </ul>
+
+  <h2>4.2 解析流程</h2>
+  <div class="flow">
+    <div class="flow-step"><b>读取</b>PyMuPDF 打开</div><span class="flow-arrow">→</span>
+    <div class="flow-step"><b>定日期</b>页脚年月日</div><span class="flow-arrow">→</span>
+    <div class="flow-step"><b>定列</b>表头 1–13 + 时间词</div><span class="flow-arrow">→</span>
+    <div class="flow-step"><b>定行</b>x0&lt;95 取教室</div><span class="flow-arrow">→</span>
+    <div class="flow-step"><b>落格</b>课/借/考按最近行列</div><span class="flow-arrow">→</span>
+    <div class="flow-step"><b>合并</b>多页按教室名</div>
+  </div>
+  <ol>
+    <li><b>日期与星期</b>：从页脚“2026 年 11 月 01 日”提取日期；优先用“星期一”文字，缺失时按日期推算。同一天多页按教室名合并。</li>
+    <li><b>列定位</b>：表头数字 1–13 的词与 08:15/09:00 等时间词共同确定 13 列；时段从时间文字动态读取，不写死。缺列时按等距兜底，避免某页表头轻微偏移导致整页失败。</li>
+    <li><b>行识别</b>：教室名在左侧列（x0 &lt; 95）；首行可能紧贴表头（y≈87），因此阈值取 <span class="mono">y &lt; 80</span>，并用 <span class="mono">cy &lt;= 80</span> 标记；这一改动修正了 11-02 从 157 间到 160 间、课节 671→675。</li>
+    <li><b>占用落格</b>：对「课」「借」「考」「考试」四个词，取最近的行与列；同一格出现多个类型时，优先级 <span class="mono">class &gt; exam &gt; borrow</span>，保证冲突可解释。</li>
+    <li><b>容量与过滤</b>：容量取右侧数字列（x&gt;500）；只保留 <span class="mono">松[12]\d{3}</span> 与四个特殊行；容量为 0 且无任何标记的版式标题（如“体育馆”）丢弃。</li>
+    <li><b>输出</b>：<span class="mono">{date, weekday, slots, rooms, page_count, source_sha256, summary}</span>；解析失败抛 <span class="mono">ScheduleParseError</span>，逐文件展示原因。</li>
+  </ol>
+  <div class="callout warn">
+    <div class="t">解析器的脆弱点</div>
+    <p>坐标阈值对版式变化敏感：换字体、换打印缩放、表头增删列都可能导致行列错位。当前用“表头数字 + 时间词 + 等距兜底”降低风险，但换版式仍应先用样例回归，再上线。</p>
+  </div>
+
+  <h2>4.3 数据模型</h2>
+  <div class="code"><span class="k">CREATE TABLE</span> schedule_days(
+  date TEXT PRIMARY KEY, weekday TEXT, slots_json TEXT,
+  source_name TEXT, source_sha256 TEXT, imported_at TEXT,
+  imported_by TEXT, room_count INTEGER, regular_rooms INTEGER,
+  class_count INTEGER, borrow_count INTEGER, exam_count INTEGER
+);
+<span class="k">CREATE TABLE</span> schedule_rooms(
+  date TEXT, name TEXT, building TEXT, digits TEXT, capacity INTEGER,
+  special INTEGER, class_mask INTEGER, borrow_mask INTEGER, exam_mask INTEGER,
+  PRIMARY KEY(date, name)
+);
+<span class="k">CREATE INDEX</span> idx_sr_date <span class="k">ON</span> schedule_rooms(date);</div>
+  <p><b>位图设计</b>：第 i 位对应第 i 节（0–12），1 表示占用。前端按连续位合并 colspan；统计节数用 <span class="mono">bit_count</span>，时长 = 节数 × 45 分钟。位图比“每节一行”更紧凑，160 间 × 13 节只需 160 行/天。</p>
+  <p><b>迁移</b>：老库启动时幂等建表；<span class="mono">regular_rooms</span>、<span class="mono">exam_count</span>、<span class="mono">exam_mask</span> 通过 <span class="mono">PRAGMA table_info</span> 检查后 <span class="mono">ALTER TABLE</span> 补齐，并回填 <span class="mono">regular_rooms</span>。</p>
+  <p><b>原始 PDF</b>：保存到 <span class="mono">&lt;DB目录&gt;/schedules/&lt;date&gt;.pdf</span>；覆盖导入时同日期文件替换；<span class="mono">source_sha256</span> 记录内容哈希，便于判断“同一天是否真的是同一份表”。</p>
+
+  <h2>4.4 接口契约</h2>
+  <table class="compact">
+    <thead><tr><th style="width:26%">方法与路径</th><th style="width:14%">权限</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">POST /api/schedule/preview</span></td><td>settings</td><td>多文件 PDF/ZIP 解析预览；逐文件返回 date/summary/exists/error，不写库。</td></tr>
+      <tr><td><span class="mono">POST /api/schedule/import</span></td><td>settings</td><td><span class="mono">files</span> + <span class="mono">replace=1</span>；同日默认 409，覆盖需显式确认；事务内整日删插。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/days?from&amp;to</span></td><td>登录</td><td>月历数据（最多 400 天）；每天附课/借/考分钟；summary 含 available_rooms/used_rooms。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/day?date=</span></td><td>登录</td><td>单日 slots/rooms/summary/source；未导入 404 + <span class="mono">not_imported</span>。</td></tr>
+      <tr><td><span class="mono">DELETE /api/schedule/day?date=</span></td><td>settings</td><td>删除当日数据与原始 PDF。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/source?date=</span></td><td>登录</td><td>下载原始 PDF（send_file）。</td></tr>
+    </tbody>
+  </table>
+  <p><b>导入事务</b>：先校验全部文件解析成功与冲突策略，再在单连接事务中 <span class="mono">DELETE schedule_rooms/schedule_days</span> → <span class="mono">INSERT</span> → 落盘 PDF → <span class="mono">COMMIT</span>；任一步失败整体回滚。审计写“数据 / 导入排课表”，详情含日期、教室数、课/借/考节数。</p>
+  <p><b>限制</b>：单文件 20MB、总量 80MB、最多 40 个 PDF；ZIP 内仅取 PDF；文件名不参与业务判断，日期以 PDF 内容为准。</p>
+
+  <h2>4.5 统计口径</h2>
+  <table class="compact">
+    <thead><tr><th style="width:22%">指标</th><th>公式 / 说明</th><th style="width:22%">示例（11 月）</th></tr></thead>
+    <tbody>
+      <tr><td>可用教室</td><td><span class="mono">MAX(regular_rooms)</span>，当月单日最大普通教室数</td><td>156</td></tr>
+      <tr><td>本月使用过</td><td><span class="mono">COUNT(DISTINCT name)</span>，<span class="mono">special=0</span> 且课/借/考任一非空</td><td>135</td></tr>
+      <tr><td>使用率</td><td>使用过 ÷ 可用，保留 1 位小数</td><td>86.5%</td></tr>
+      <tr><td>课节 / 借节 / 考节</td><td>各位图 <span class="mono">bit_count</span> 之和</td><td>3,695 / 768 / —</td></tr>
+      <tr><td>使用总时长</td><td>(课 + 借 + 考) × 45 分钟；只统计普通教室</td><td>200,655 分钟</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <div class="t">为什么“使用过”不是“可用”</div>
+    <p>“可用教室”是容量口径（156 间），“使用过”是去重口径（135 间），两者必然满足“使用过 ≤ 可用”。11 月只导入了 10 天，剩余 21 间在这 10 天内没有占用，所以没有被计入。页面用“本月使用过”而不是“使用教室”，并在帮助文案里写明公式。</p>
+  </div>
+
+  <h2>4.6 前端实现</h2>
+  <ul class="tight">
+    <li><b>月历</b>：原生 <span class="mono">&lt;input type="month"&gt;</span> + 「今天」；周一开头 42 格；只有已导入日期高亮并显示课/借/考计数；切换月份时若今天不在本月，自动选第一个有数据日。</li>
+    <li><b>月卡</b>：8 项统计（有考试时动态追加考节/考试时长），2 列布局；使用率单独一卡；已导入天数显示在右上角。</li>
+    <li><b>日视图</b>：顶部 8 个统计卡；工具栏为“全部/一教/二教/其他 + 只看有占用”；表格两行表头（上午/下午/晚上分组），单元格按连续同类型 colspan 合并，但<b>不跨时段合并</b>；三组不同底色 + 竖向分隔线。</li>
+    <li><b>教室筛选</b>：<span class="mono">roomNeedle()</span> 去空格/小写，<span class="mono">一教/1教→松1</span>、<span class="mono">二教/2教→松2</span>；<span class="mono">roomMatch()</span> 同时匹配名称与数字编号；输入值放在 <span class="mono">st.roomQuery</span>，切换日期/月份/今天都保留，只有「清除」或重新进入视图才重置。</li>
+    <li><b>抽屉</b>：点击单元格显示日期、时段、时长、类型、容量；连续时段显示“08:15–11:35 / 3 小时（4 节）”。</li>
+    <li><b>上传</b>：多选 PDF/ZIP → 预览卡（新日期/已存在/解析失败）→ 冲突勾选覆盖或二次确认 → 导入后刷新月历并选中首个导入日。</li>
+  </ul>
+</div>
+
+<!-- ================= 05 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">05</span>v1.5.4 关键变更</h1>
+  <p class="lead">除了排课，v1.5.4 还处理了三件交付层的事：让通用授权可重复签发、让安装器不覆盖现场已有授权、让 PyMuPDF 不再把 50MB 的 AI 模型塞进安装包。</p>
+
+  <h2>5.1 通用授权（内部机制）</h2>
+  <table class="compact">
+    <thead><tr><th style="width:24%">环节</th><th>实现</th></tr></thead>
+    <tbody>
+      <tr><td>签发</td><td><span class="mono">build_release.ps1</span> 读取仓根 <span class="mono">release_license.json</span>（org/edition/max_users），以构建日 +1 年调用 <span class="mono">tools/make_license.py --machine "*" --expires ... --users ...</span>，输出 <span class="mono">build/license/license.json</span>。</td></tr>
+      <tr><td>校验</td><td><span class="mono">license_key.load_status()</span> 对 <span class="mono">machine="*"</span> 跳过本机机器码比对；RSA 签名、到期、时间回拨校验不变。</td></tr>
+      <tr><td>安装</td><td><span class="mono">installer_gui.install()</span>：数据目录已有 <span class="mono">license.json</span> 时不覆盖；没有才复制随包通用授权；完成页显示单位/版本/用户数/到期日。</td></tr>
+      <tr><td>打包版试用</td><td><span class="mono">allow_trial = not sys.frozen</span>（可用 <span class="mono">DHU_OPS_ALLOW_TRIAL=1</span> 覆盖）；打包版缺少授权时返回 invalid，不静默生成 30 天试用。</td></tr>
+      <tr><td>用户上限</td><td><span class="mono">max_users=20</span>：创建账号、重新启用账号时统计 <span class="mono">users WHERE active=1</span>，达到上限返回 403。</td></tr>
+      <tr><td>到期</td><td>7 天只读宽限后锁屏；客户凭机器码签发正式授权覆盖。</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <div class="t">残余风险</div>
+    <p>通用授权文件可被复制到多台机器，但到期日固定，不能换机续期；如果未来要求“完全防多机”，需要联网激活或服务端授权，离线模式做不到。当前把它定位为“交付便利 + 到期约束”，不是强防破解。</p>
+  </div>
+
+  <h2>5.2 教室筛选（方案 A）</h2>
+  <p>日视图顶部统计保持<b>全楼全局</b>，输入框右侧单独显示<b>当前教室小计</b>。这样既能看到“今天整体用了多少”，也能回答“这间教室今天什么时段有课”，两个问题不互相污染。筛选状态放在视图层，切换日期/月份保留，避免每换一天都要重新输入。</p>
+
+  <h2>5.3 PyMuPDF 瘦身</h2>
+  <p>PyMuPDF 2.1 安装体积约 104.5MB；官方 PyInstaller hook 对 <span class="mono">pymupdf &gt;= 2.0</span> 执行 <span class="mono">collect_data_files('pymupdf')</span>，把整个包收进产物，其中 <span class="mono">layout/resources/onnx/</span> 约 50MB（版面/表格 AI 模型，本系统未使用）、<span class="mono">mupdf-devel/</span> 约 6.5MB、<span class="mono">__pycache__</span> 约 5MB；真正必需的是 <span class="mono">mupdfcpp64.dll</span>（25.2MB）+ <span class="mono">_mupdf.pyd</span>（12.4MB）。</p>
+  <div class="code"><span class="c"># tools/pyi_hooks/hook-pymupdf.py</span>
+<span class="k">from</span> PyInstaller.utils.hooks <span class="k">import</span> collect_data_files
+datas = collect_data_files(
+    <span class="s">'pymupdf'</span>,
+    excludes=[<span class="s">'layout/**'</span>, <span class="s">'mupdf-devel/**'</span>, <span class="s">'__pycache__/**'</span>,
+              <span class="s">'**/__pycache__/**'</span>, <span class="s">'**/*.pyc'</span>]
+)</div>
+  <p>构建命令增加 <span class="mono">--additional-hooks-dir tools\pyi_hooks</span>。实测 onefile 服务端 89.1MB → 45.9MB；打包版对 11-02 PDF 的预览仍得到 160 间/675 课/20 借，说明 DLL 与解析链路完整。</p>
+
+  <h2>5.4 构建脚本修复</h2>
+  <table class="compact">
+    <thead><tr><th style="width:24%">问题</th><th>处理</th></tr></thead>
+    <tbody>
+      <tr><td>PowerShell 5.1 按 ANSI 读取无 BOM 的 UTF-8 脚本</td><td>用 <span class="mono">UTF8Encoding($true)</span> 重写 <span class="mono">build_release.ps1</span>，保留 BOM；改完用 <span class="mono">[scriptblock]::Create()</span> 预解析。</td></tr>
+      <tr><td>PyInstaller 将 INFO 写到 stderr，触发 <span class="mono">NativeCommandError</span></td><td>调用前后临时把 <span class="mono">$ErrorActionPreference</span> 设为 <span class="mono">Continue</span>，再恢复 <span class="mono">Stop</span>；保留 <span class="mono">$LASTEXITCODE</span> 判定。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5.5 发布前自检</h2>
+  <div class="grid-2">
+    <div class="card soft"><h4>构建机</h4><p>PowerShell 5.1 下先 <span class="mono">[scriptblock]::Create()</span> 预解析脚本；确认 BOM 仍在；PyInstaller 三段构建都检查 <span class="mono">$LASTEXITCODE</span>。</p></div>
+    <div class="card soft"><h4>产物</h4><p>核对 server/setup/zip 体积是否符合预期；zip 根目录同时有 <span class="mono">license.json</span> 与安装程序；<span class="mono">releases.json</span> 已追加。</p></div>
+    <div class="card soft"><h4>冒烟</h4><p>打包版独立目录启动，验证 <span class="mono">/api/health</span>、<span class="mono">/api/license</span>、登录、排课预览；再验证无授权目录不生成试用文件。</p></div>
+    <div class="card soft"><h4>现场</h4><p>安装到干净 Windows 10/11，确认计划任务、防火墙、快捷方式、初始密码文件；卸载默认保留数据。</p></div>
+  </div>
+  <p class="note" style="margin-top:4mm">这次两个失败都发生在“脚本编码”和“外部命令输出”上，不是业务代码。发布脚本应被视为生产代码：每次改动都做一次预解析和最小构建。</p>
+</div>
+
+<!-- ================= 06 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">06</span>关键机制与数据契约</h1>
+  <p class="lead">这一章是“改代码前必须知道”的部分：state 怎么读写、冲突怎么处理、权限在哪里校验、审计由谁写。</p>
+
+  <h2>6.1 业务 state 与乐观锁</h2>
+  <ul class="tight">
+    <li><b>单行 JSON</b>：<span class="mono">state</span> 表保存 settings / tickets / patrols / assets；GET 全量返回，POST 全量提交。</li>
+    <li><b>rev</b>：每次保存 <span class="mono">rev+1</span>；客户端携带 <span class="mono">baseRev</span>，不一致返回 409 并附最新 state；前端合并 tickets/patrols 后重试。</li>
+    <li><b>权限域</b>：<span class="mono">denied_state_fields()</span> 按发生变化的顶层域检查权限；管理员恒放行；首次写入（空库）放行；未改动字段原样提交不受影响。</li>
+    <li><b>mart</b>：保存成功后 <span class="mono">mart_sync()</span> 全量重写三张宽表，与 state 同事务；失败整体回滚并返回 500。</li>
+    <li><b>已知边界</b>：409 合并只覆盖 tickets/patrols，settings/assets/kb 的本地改动在冲突时被远端覆盖；目前靠单账号单会话 + 低并发缓解。</li>
+  </ul>
+
+  <h2>6.2 鉴权、权限与审计</h2>
+  <table class="compact">
+    <thead><tr><th style="width:22%">机制</th><th>实现</th></tr></thead>
+    <tbody>
+      <tr><td>登录</td><td>PBKDF2-HMAC-SHA256（20 万次）+ salt；旧 SHA-256 登录时自动升级；单账号只保留最新会话。</td></tr>
+      <tr><td>会话</td><td><span class="mono">sessions</span> 表存 token，24 小时过期；改密/重置/停用会删除对应用户会话。</td></tr>
+      <tr><td>权限点</td><td>12 个菜单权限；<span class="mono">require_perm(*keys)</span> 任一满足；管理员恒放行。</td></tr>
+      <tr><td>报表/CSV/审计</td><td>6 个报表 JSON 需 <span class="mono">reports</span>；CSV 需 data/tickets/reports 之一；审计按类别校验，页面类全员、登录/用户/系统仅管理员。</td></tr>
+      <tr><td>审计</td><td><span class="mono">audit_write()</span> 写 <span class="mono">audit_logs</span>；客户端上报为“尽力而为”，关键动作由服务端写。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6.3 备份与恢复</h2>
+  <p>备份走 sqlite3 backup API，最多保留 20 份；恢复读取整个上传文件、校验 SQLite magic 与 state/users 表、<span class="mono">os.replace(tmp, DB)</span> 热替换后 <span class="mono">init_db()</span>。已知边界：无上传大小限制、恢复时不清 sessions、热替换期间有并发风险；建议在维护窗口执行。</p>
+
+  <h2>6.4 数据字典（排课）</h2>
+  <table class="compact">
+    <thead><tr><th style="width:22%">字段</th><th style="width:14%">类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">schedule_days.date</span></td><td>TEXT PK</td><td>YYYY-MM-DD，来自 PDF 页脚。</td></tr>
+      <tr><td><span class="mono">slots_json</span></td><td>TEXT</td><td>13 节 [{index,start,end,minutes}]，实际时间从 PDF 读取。</td></tr>
+      <tr><td><span class="mono">regular_rooms</span></td><td>INTEGER</td><td>当天普通教室数（special=0）；用于“可用教室”。</td></tr>
+      <tr><td><span class="mono">class_mask</span></td><td>INTEGER</td><td>13 位位图，第 i 位=第 i 节有课。</td></tr>
+      <tr><td><span class="mono">borrow_mask</span></td><td>INTEGER</td><td>同上，借用。</td></tr>
+      <tr><td><span class="mono">exam_mask</span></td><td>INTEGER</td><td>同上，考试（v1.5.4 新增）。</td></tr>
+      <tr><td><span class="mono">source_sha256</span></td><td>TEXT</td><td>原始 PDF 内容哈希，用于追溯与去重判断。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ================= 07 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">07</span>测试与质量</h1>
+  <p class="lead">项目没有 CI，测试以本地脚本为主。v1.5.4 的关键路径已覆盖，但样本依赖、UI 断言和环境隔离仍有缺口；这也是下一阶段最值得补的工程债。</p>
+
+  <h2>7.1 测试矩阵</h2>
+  <table class="compact">
+    <thead><tr><th style="width:30%">脚本</th><th style="width:14%">结果</th><th>覆盖</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">test_schedule.py</span></td><td>47/47</td><td>解析日期/星期/13 节/教室数/课借考计数/分钟/特殊行/容量/sha256；预览/导入/409/覆盖/查询/404/原 PDF/删除。</td></tr>
+      <tr><td><span class="mono">test_license_universal.py</span></td><td>13/13</td><td>通用 <span class="mono">*</span>、错机器/过期拒绝、打包模式不试用、导入通用授权。</td></tr>
+      <tr><td><span class="mono">test_state_perm.py</span></td><td>55/55</td><td>报表/CSV/审计权限矩阵；独立临时目录，避免授权文件污染。</td></tr>
+      <tr><td><span class="mono">test_password_policy.py</span></td><td>26/26</td><td>随机初始口令、强制改密、弱密码、重置、<span class="mono">--reset-admin</span>、监听决策。</td></tr>
+      <tr><td><span class="mono">ui_selftest.py</span></td><td>95/95</td><td>Playwright 端到端：登录、日志、巡视、报表、PDF、移动端。</td></tr>
+      <tr><td><span class="mono">test_save_atomic.py</span></td><td>10/10</td><td>mart 故障时 state 不半写、返回 500、恢复后可保存。</td></tr>
+      <tr><td><span class="mono">test_report_patrol_link.py</span></td><td>9/9</td><td>巡视关联工单的日期/楼栋过滤。</td></tr>
+    </tbody>
+  </table>
+  <p class="note">另有 <span class="mono">test_state_rev</span> 15/15、<span class="mono">test_date_clamp</span> 13/13、<span class="mono">test_topbar_cal</span> 8/8、<span class="mono">test_default_room</span> 12/12、<span class="mono">test_pdf_export</span> PASS。`test_daily_import`/`test_march_import`/`test_export_format` 需要真实日报 xlsx 样本，缺样本时按设计退出。</p>
+
+  <h2>7.2 运行方式</h2>
+  <div class="code">$py = <span class="s">'D:\File\AI\dhu\.build-venv\Scripts\python.exe'</span>
+&amp; $py tests\test_schedule.py
+&amp; $py tests\test_state_perm.py
+&amp; $py tests\ui_selftest.py
+&amp; $py -m py_compile server.py schedule_parser.py
+node --check assets\store.js
+node --check assets\views-schedule.js</div>
+  <p>必须使用 <span class="mono">.build-venv</span>，PATH 中的 python 没有 Flask/PyMuPDF。</p>
+
+  <h2>7.3 质量缺口</h2>
+  <table class="compact">
+    <thead><tr><th style="width:26%">缺口</th><th>影响</th><th style="width:26%">建议</th></tr></thead>
+    <tbody>
+      <tr><td>无 CI</td><td>回归靠人工记得跑，容易漏</td><td>GitHub Actions/本地 hook：py_compile + 核心接口 + node --check</td></tr>
+      <tr><td>fixtures 缺失</td><td>3 个导入/导出测试长期跳过</td><td>脱敏样本入库，或提供生成器</td></tr>
+      <tr><td>UI 测试依赖本机 Chrome</td><td>换机/无网环境不可跑</td><td>Playwright 自带 Chromium + 固定 viewport</td></tr>
+      <tr><td>解析器只对样例版式</td><td>换版式可能整页错位</td><td>增加版式指纹与失败告警；保留原 PDF 便于回溯</td></tr>
+      <tr><td>缺少性能基线</td><td>数据量大时无量化依据</td><td>用 253 间 × 1 年数据压测 state/报表/排课</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ================= 08 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">08</span>构建、发布与回滚</h1>
+  <p class="lead">发布脚本已经能把版本号、前端产物、三个 exe、授权和归档串起来，但仍依赖 Windows PowerShell 5.1 的编码行为，且缺少“安装后真实覆盖升级”的自动化验证。</p>
+
+  <h2>8.1 构建流程</h2>
+  <ol class="tight">
+    <li>确认 <span class="mono">release_license.json</span> 的 org/edition/max_users；脚本按构建日 +1 年签发通用授权。</li>
+    <li>运行 <span class="mono">build_release.ps1 -Version 1.5.4 -Notes "..."</span>；脚本写 <span class="mono">version.json</span>、<span class="mono">assets/version.json</span>、<span class="mono">assets/version.js</span>。</li>
+    <li>压缩前端、生成版本信息，断言前端产物不含私钥/证书。</li>
+    <li>PyInstaller 依次打 server / launcher / setup；setup 通过 <span class="mono">--add-data</span> 内嵌 server、launcher、license。</li>
+    <li>归档 <span class="mono">releases/v&lt;ver&gt;/</span>，组装 zip，更新 <span class="mono">releases/releases.json</span>。</li>
+  </ol>
+
+  <h2>8.2 产物与体积</h2>
+  <table class="compact">
+    <thead><tr><th>产物</th><th>v1.5.3</th><th>v1.5.4</th><th>变化</th></tr></thead>
+    <tbody>
+      <tr><td>server.exe</td><td>89.1 MB</td><td>45.9 MB</td><td>PyMuPDF hook 瘦身</td></tr>
+      <tr><td>setup.exe</td><td>114.7 MB</td><td>71.6 MB</td><td>内嵌 server 同步变小</td></tr>
+      <tr><td>一键安装包 zip</td><td>210.7 MiB</td><td>118.6 MiB</td><td>约 -44%</td></tr>
+    </tbody>
+  </table>
+
+  <h2>8.3 发布冒烟清单</h2>
+  <ol class="tight">
+    <li>打包版 + 临时 DB + 随包通用授权启动：<span class="mono">/api/health</span> 返回版本；<span class="mono">/api/license</span> 返回 valid 与到期日。</li>
+    <li>admin 登录后 <span class="mono">/api/schedule/preview</span> 解析样例 PDF，确认 160 间/675 课/20 借。</li>
+    <li>无授权目录启动：返回 invalid，且不生成试用文件。</li>
+    <li><span class="mono">max_users=2</span> 专项：创建第 3 个启用账号 403；停用后可创建；再启用 403。</li>
+    <li>Playwright 打开打包版：月卡 8 项、教室输入框、三时段表头、原始 PDF 下载。</li>
+    <li>检查安装器：已有 license 不覆盖、access.txt 写入、防火墙仅私网/本地子网、完成页信息正确。</li>
+  </ol>
+
+  <h2>8.4 回滚</h2>
+  <ul class="tight">
+    <li><b>代码</b>：<span class="mono">git revert</span> / <span class="mono">git checkout</span> 对应提交；本版无破坏性 DB 迁移（只加列/加表）。</li>
+    <li><b>已安装版本</b>：安装目录下「版本回滚.bat」按版本号回滚，回滚前自动备份当前版本。</li>
+    <li><b>数据</b>：排课表与 state 独立；回滚旧版代码不会删除 <span class="mono">schedule_*</span> 表，旧版忽略即可。</li>
+  </ul>
+</div>
+
+<!-- ================= 09 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">09</span>优化与改进建议</h1>
+  <p class="lead">下面按“影响 × 紧迫度”排序。P1 建议下一迭代做，P2 放在季度内，P3 作为长期方向；工作量为单人估算，含自测，不含跨团队协作。</p>
+
+  <h2>9.1 优先级总表</h2>
+  <table class="compact">
+    <thead><tr><th style="width:6%">编号</th><th style="width:8%">级别</th><th style="width:22%">问题</th><th>影响与建议</th><th style="width:10%">预估</th></tr></thead>
+    <tbody>
+      <tr><td>O1</td><td><span class="tag red">P1</span></td><td>排课 PDF 需每天手动上传</td><td>漏传会导致当天查询为空。建议增加“监控目录自动导入”或对接教务导出目录；失败时在页面提示。</td><td>3–5 天</td></tr>
+      <tr><td>O2</td><td><span class="tag red">P1</span></td><td>只覆盖一教/二教</td><td>四教、化工、中南、机房无法查询。建议扩展房间映射表与模板，先支持“无排课数据”的明确提示。</td><td>3–5 天</td></tr>
+      <tr><td>O3</td><td><span class="tag red">P1</span></td><td>PDF 只有“课/借/考”，无课程/教师</td><td>无法回答“谁在用”。需教务数据源（导出表/API），不是解析问题。</td><td>5–10 天</td></tr>
+      <tr><td>O4</td><td><span class="tag red">P1</span></td><td><span class="mono">/api/state</span> 全量读写 + 全量返回</td><td>数据量增大后保存变慢；任何登录用户可读全量。建议按域拆接口/服务端裁剪，灰度切换。</td><td>8–12 天</td></tr>
+      <tr><td>O5</td><td><span class="tag gold">P2</span></td><td>mart 全量重写三表</td><td>每次保存 DELETE+INSERT，数据量大时延迟上升。建议脏域标记 + 增量/异步重建。</td><td>4–6 天</td></tr>
+      <tr><td>O6</td><td><span class="tag gold">P2</span></td><td>Flask 开发服务器对外</td><td>并发与健壮性不足。建议 waitress（Windows）或反向代理；补超时与限流。</td><td>1 天</td></tr>
+      <tr><td>O7</td><td><span class="tag gold">P2</span></td><td>SQLite 无 WAL/busy_timeout</td><td>并发写易锁等待。建议启动设置 WAL、busy_timeout、foreign_keys。</td><td>0.5 天</td></tr>
+      <tr><td>O8</td><td><span class="tag gold">P2</span></td><td>排课导入无版本/撤销</td><td>覆盖后只剩最新一天。建议保留导入历史与“撤销到上一版”，至少保留最近 3 版 PDF。</td><td>3–4 天</td></tr>
+      <tr><td>O9</td><td><span class="tag gold">P2</span></td><td>审计为客户端上报</td><td>403 时静默丢弃，不能作为强审计。建议关键动作服务端写审计，客户端只补页面访问。</td><td>2–3 天</td></tr>
+      <tr><td>O10</td><td><span class="tag gold">P2</span></td><td>前端无构建/模块化</td><td>15 个 script 顺序加载，依赖全局变量；XSS 面靠人工转义。建议 Vite/ESM + lint + 组件化。</td><td>6–10 天</td></tr>
+      <tr><td>O11</td><td><span class="tag gold">P2</span></td><td>备份恢复边界</td><td>无上传大小限制、恢复不清 sessions、热替换有并发风险。建议维护窗口 + 限制 + 恢复后强制重登。</td><td>2–3 天</td></tr>
+      <tr><td>O12</td><td><span class="tag gold">P2</span></td><td>测试缺 CI 与样本</td><td>回归靠人工；3 个导入测试长期跳过。建议 fixtures 入库 + Actions 跑核心矩阵。</td><td>2–3 天</td></tr>
+      <tr><td>O13</td><td><span class="tag gray">P3</span></td><td>排课缺周/学期视图</td><td>当前按月+日，规划排班仍需逐日点。建议周视图、学期总览、导出 Excel。</td><td>4–6 天</td></tr>
+      <tr><td>O14</td><td><span class="tag gray">P3</span></td><td>首次演示数据</td><td>空库会自动写入约 96 条演示数据，投产易混淆。建议首次向导/开关，默认关闭。</td><td>1–2 天</td></tr>
+      <tr><td>O15</td><td><span class="tag gray">P3</span></td><td>可观测性不足</td><td>只有控制台日志；排障靠猜。建议结构化日志、健康详情、慢查询与导入失败指标。</td><td>2–3 天</td></tr>
+      <tr><td>O16</td><td><span class="tag gray">P3</span></td><td>通用授权多机复制</td><td>离线模式无法彻底防多机。建议保留现状并在合同层约束；如强需求再评估联网激活。</td><td>5–10 天</td></tr>
+      <tr><td>O17</td><td><span class="tag gray">P3</span></td><td>移动端排课表体验</td><td>13 列在手机上需横向滚动。建议“按教室卡片”视图或默认只看有占用。</td><td>2–3 天</td></tr>
+      <tr><td>O18</td><td><span class="tag gray">P3</span></td><td>打印分页未优化</td><td>长表打印可能截断。建议 print CSS 分页与表头重复。</td><td>1–2 天</td></tr>
+    </tbody>
+  </table>
+
+  <h2>9.2 建议路线图</h2>
+  <div class="grid-3">
+    <div class="card"><span class="n">NOW · 2 周</span><h4>把“每天要用”的体验做顺</h4><p>O1 自动导入/提醒、O2 其他楼栋提示、O6 waitress、O7 WAL、O14 演示数据开关。目标：值班员不因漏传 PDF 而查不到课。</p></div>
+    <div class="card"><span class="n">NEXT · 1–2 月</span><h4>把数据和权限做稳</h4><p>O4 state 拆分、O5 增量 mart、O8 导入历史、O9 服务端审计、O11 备份边界。目标：数据量翻倍仍可接受。</p></div>
+    <div class="card"><span class="n">LATER · 1 季度</span><h4>把排课做成“课程级”</h4><p>O3 教务数据、O13 周/学期视图、O10 前端工程化、O15 可观测。目标：从“查占用”升级为“查课程”。</p></div>
+  </div>
+
+  <h2>9.3 验收标准（建议）</h2>
+  <ul class="tight">
+    <li><b>自动导入</b>：目录出现 PDF 后 1 分钟内可查；失败在页面有红色提示；重复文件按 hash 跳过。</li>
+    <li><b>性能</b>：253 间教室 × 1 年数据下，保存 P95 &lt; 1.5s，月历 P95 &lt; 800ms，日报表 P95 &lt; 2s。</li>
+    <li><b>权限</b>：仅 dashboard 权限的账号无法通过任何接口读取工单明细；越权返回 403 且审计留痕。</li>
+    <li><b>可靠性</b>：连续 100 次导入/覆盖无脏数据；任意失败后 state 与 mart 一致。</li>
+    <li><b>可运维</b>：安装包在干净 Windows 10/11 上完成安装、启动、卸载；升级不覆盖已有授权与数据。</li>
+  </ul>
+
+  <h2>9.4 取舍原则</h2>
+  <div class="callout">
+    <div class="t">先保“每天能用”，再谈“架构漂亮”</div>
+    <p>排课模块的下一阶段优先解决漏传、查不到、口径不清这三类现场问题；state 拆分、前端工程化、可观测性属于“数据量或团队规模上来后再做”的事。任何改造都应保留灰度开关与回滚路径，避免为了架构目标牺牲值班连续性。</p>
+  </div>
+</div>
+
+<!-- ================= 10 ================= -->
+<div class="section page">
+  <h1 class="sec"><span class="no">10</span>附录</h1>
+
+  <h2>A.1 接口速查（排课与关键）</h2>
+  <table class="compact">
+    <thead><tr><th style="width:34%">接口</th><th style="width:14%">权限</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">POST /api/login</span></td><td>公开</td><td>登录，返回 token 与 must_change_pwd。</td></tr>
+      <tr><td><span class="mono">GET /api/state</span></td><td>登录</td><td>全量业务数据 + rev。</td></tr>
+      <tr><td><span class="mono">POST /api/state</span></td><td>按域</td><td>全量保存，baseRev 乐观锁。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/days</span></td><td>登录</td><td>月历 + 月度汇总。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/day</span></td><td>登录</td><td>单日明细。</td></tr>
+      <tr><td><span class="mono">POST /api/schedule/preview</span></td><td>settings</td><td>PDF/ZIP 预览。</td></tr>
+      <tr><td><span class="mono">POST /api/schedule/import</span></td><td>settings</td><td>导入/覆盖。</td></tr>
+      <tr><td><span class="mono">GET /api/schedule/source</span></td><td>登录</td><td>下载原 PDF。</td></tr>
+      <tr><td><span class="mono">GET /api/report/summary</span></td><td>reports</td><td>区间汇总。</td></tr>
+      <tr><td><span class="mono">POST /api/export/csv</span></td><td>data/tickets/reports</td><td>CSV 导出。</td></tr>
+    </tbody>
+  </table>
+  <p class="note">完整清单见 <span class="mono">docs/api.md</span>（39 个接口，按模块分组）。</p>
+
+  <h2>A.2 文件地图</h2>
+  <table class="compact">
+    <thead><tr><th style="width:30%">路径</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">server.py</span></td><td>接口、DB、权限、报表、排课、启动</td></tr>
+      <tr><td><span class="mono">schedule_parser.py</span></td><td>PDF 坐标解析</td></tr>
+      <tr><td><span class="mono">assets/views-schedule.js</span></td><td>排课月历/日视图/筛选/上传</td></tr>
+      <tr><td><span class="mono">assets/store.js</span></td><td>save 队列、409 合并、排课 API</td></tr>
+      <tr><td><span class="mono">assets/app.js</span></td><td>路由、NAV、启动、保存指示器</td></tr>
+      <tr><td><span class="mono">tests/test_schedule.py</span></td><td>解析 + 接口 47 项</td></tr>
+      <tr><td><span class="mono">tools/pyi_hooks/hook-pymupdf.py</span></td><td>PyMuPDF 数据过滤</td></tr>
+      <tr><td><span class="mono">build_release.ps1</span></td><td>版本、打包、归档、通用授权</td></tr>
+    </tbody>
+  </table>
+
+  <h2>A.3 术语</h2>
+  <table class="compact">
+    <tbody>
+      <tr><th style="width:22%">state</th><td>业务数据单行 JSON（settings/tickets/patrols/assets）。</td></tr>
+      <tr><th>mart</th><td>报表宽表，由 state 全量同步。</td></tr>
+      <tr><th>位图</th><td>13 位整数表示 13 节占用，第 i 位对应第 i 节。</td></tr>
+      <tr><th>可用教室</th><td>单日普通教室总数（当前 156）。</td></tr>
+      <tr><th>使用率</th><td>本月使用过（去重）÷ 可用教室。</td></tr>
+      <tr><th>特殊行</th><td>同传室、待定、不使用教室、体育馆电化，归入“其他”。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>A.4 维护与反馈</h2>
+  <div class="grid-2">
+    <div class="card soft"><h4>文档维护</h4><p>功能、接口或部署方式变化时，同步更新本册、<span class="mono">README.md</span>、<span class="mono">开发文档.md</span> 与 <span class="mono">docs/api.md</span>；版本号以 <span class="mono">version.json</span> 为准。</p></div>
+    <div class="card soft"><h4>问题反馈</h4><p>现场问题请附带：版本号、发生时间、账号角色、操作路径、截图或日志；排课问题另附原始 PDF，便于复现解析结果。</p></div>
+  </div>
+  <p class="note" style="margin-top:5mm">本册完成于 v1.5.4 发布当天。下一版应优先补充：自动导入、其他楼栋扩展、课程级数据接入后的架构变化。</p>
+
+  <div class="note" style="margin-top:8mm">
+    东华大学多媒体教室运维系统 · 开发功能文档（内部） · v1.5.4<br>
+    东华大学信息中心 · 2026 年 11 月 21 日<br>
+    本文档包含内部实现与风险判断，请勿对外分发。
+  </div>
+</div>
+
+</body>
+</html>
