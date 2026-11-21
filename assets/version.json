@@ -1,5 +1,5 @@
 {
-    "version":  "1.5.4",
-    "buildTime":  "2026-11-21T15:57:13+08:00",
-    "notes":  "通用授权（打包日+1年、20用户）、排课日视图教室筛选、PyMuPDF 瘦身"
+    "version":  "1.5.5",
+    "buildTime":  "2026-11-21T18:13:11+08:00",
+    "notes":  "稳定性：SQLite WAL/busy_timeout、mart 增量同步、运行日志轮转、报表参数校验、requirements 与一键回归"
 }

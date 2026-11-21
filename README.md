@@ -121,7 +121,9 @@ SQLite（开发默认 `data/dhu_ops.db`，打包后落 `%ProgramData%\DHU-Ops\`�
 > 253 间教室的验证数据在 `data/devtest.db`；真实业务数据只在客户机，不在本仓库。
 
 - **业务数据**：`state` 表单行 JSON，含 `settings` / `tickets` / `patrols` / `assets`
-- **报表宽表**：`tickets_mart` / `patrols_mart` / `devices_mart` + 索引，由 `mart_sync()` 从 state 全量同步；服务启动时 `mart_backfill()` 回填
+- **报表宽表**：`tickets_mart` / `patrols_mart` / `devices_mart` + 索引，由 `mart_sync()` 从 state 同步；**按主键增量写入**（只更新内容变化的行并删除缺失行），服务启动时 `mart_backfill()` 回填
+- **SQLite 运行参数**：`journal_mode=WAL`（启动时设置并持久化）、每连接 `busy_timeout=5000`、`foreign_keys=ON`
+- **运行日志**：`<数据库目录>/logs/server.log`，5MB × 3 份滚动，记录启动、保存耗时与 mart 变更、备份恢复、授权导入等事件（与审计表分离）
 - **账号体系**：`users` / `sessions` / `user_groups` / `group_members` / `user_permissions` / `group_permissions` / `audit_logs`
 - **排课数据**：`schedule_days`（每天一行，13 个时段 JSON）与 `schedule_rooms`（每间教室的课/借位图），原始 PDF 存 `<数据库目录>/schedules/<date>.pdf`；与业务 state 分离，不参与 `/api/state` 全量读写
 
@@ -161,6 +163,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build_release.ps1 -Notes "�
 python tests/ui_selftest.py          # Playwright 端到端
 python tests/test_daily_import.py    # 真实日报导入校验
 ```
+
+一键回归（临时库 + 临时端口，不碰 `data/dhu_ops.db`）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_regression.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_regression.ps1 -WithUi   # 含端到端
+```
+
+依赖清单：运行时 `requirements.txt`，构建/测试 `requirements-dev.txt`（版本与 `.build-venv` 一致）。
 
 共 19 个测试/诊断脚本（14 个回归用例 + `ui_selftest.py` + 冒烟/诊查脚本）。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
 

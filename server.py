@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import io
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -25,6 +26,7 @@ import tempfile
 import time
 import zipfile
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 from urllib.parse import quote
 
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
@@ -101,6 +103,39 @@ def _read_version():
 
 VERSION = _read_version()
 
+# ---------- 运行日志：数据目录下 logs/server.log，5MB × 3 份滚动 ----------
+# 与业务审计（audit_logs 表）分离：这里记录启动、保存、备份恢复、授权等运行事件，
+# 便于客户现场在无法远程时直接取日志排查。
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(DB)), 'logs')
+LOG_PATH = os.path.join(LOG_DIR, 'server.log')
+
+
+def _setup_logger():
+    lg = logging.getLogger('dhu_ops')
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    if lg.handlers:
+        return lg
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        fh = RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024,
+                                 backupCount=3, encoding='utf-8')
+        fh.setFormatter(fmt)
+        lg.addHandler(fh)
+    except Exception as e:
+        sys.stderr.write('[log] 日志文件不可写（%s）：%s\n' % (LOG_PATH, e))
+    if not getattr(sys, 'frozen', False):
+        # 开发模式：控制台只显示 WARNING 以上，避免每次保存刷屏
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(fmt)
+        sh.setLevel(logging.WARNING)
+        lg.addHandler(sh)
+    return lg
+
+
+log = _setup_logger()
+
 app = Flask(__name__, static_folder=None)
 
 
@@ -159,8 +194,12 @@ def _err_unexpected(e):
 
 # ---------- 数据库 ----------
 def get_db():
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=5)
     conn.row_factory = sqlite3.Row
+    # busy_timeout：并发写入瞬时锁冲突时等待而不是直接报 database is locked；
+    # foreign_keys 为连接级开关，需每个连接显式开启（WAL 在 init_db 中设置并持久化）
+    conn.execute('PRAGMA busy_timeout=5000')
+    conn.execute('PRAGMA foreign_keys=ON')
     return conn
 
 
@@ -217,6 +256,11 @@ def _remove_initial_pwd_file():
 def init_db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     conn = get_db()
+    # WAL：读写不再互相阻塞，多终端同时保存时明显更稳（模式写入库文件，后续连接自动沿用）
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+    except sqlite3.DatabaseError as e:
+        log.warning('开启 WAL 失败，继续使用默认日志模式：%s', e)
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS state ('
               'id INTEGER PRIMARY KEY CHECK (id = 1), '
@@ -406,14 +450,60 @@ def _count_results(results):
     return fail, total
 
 
+TICKETS_MART_COLS = (
+    'id', 'created_at', 'caller', 'phone', 'room', 'building', 'device', 'devices',
+    'fault', 'urgency', 'status', 'source', 'period', 'stage', 'log_type',
+    'assignee', 'assigned_at', 'accepted_at', 'arrived_at', 'resolved_at', 'closed_at',
+    'duration_min', 'solved', 'satisfaction', 'parts', 'helpers', 'remark', 'updated_at')
+PATROLS_MART_COLS = (
+    'id', 'date', 'period', 'name', 'plan', 'assignee', 'status', 'at', 'by', 'remark',
+    'abnormal', 'log_no', 'repair_no', 'fail_count', 'total_count', 'results_json', 'updated_at')
+DEVICES_MART_COLS = (
+    'id', 'name', 'category', 'brand', 'sn', 'room', 'building', 'bought_at', 'warranty_to',
+    'repair_count', 'status', 'note', 'created_at', 'updated_at')
+
+
+def _sync_mart_table(c, table, cols, rows):
+    """按主键增量同步一张 mart 表，返回 (写入数, 删除数)。
+
+    只写入内容真正变化的行并删除源数据中已不存在的行，避免每次保存都把整表
+    DELETE + 重插（数据量大时会产生大量 WAL 页并拉长写锁）。updated_at 为最后一列，
+    仅用于记录实际变更时间，不参与“内容是否变化”的比较。
+    """
+    existing = {}
+    for r in c.execute('SELECT %s FROM %s' % (','.join(cols), table)):
+        existing[r[0]] = tuple(r)
+    if not rows:
+        if existing:
+            c.execute('DELETE FROM %s' % table)
+        return 0, len(existing)
+    cmp_len = len(cols) - 1
+    incoming = set()
+    changed = []
+    for row in rows:
+        key = row[0]
+        incoming.add(key)
+        old = existing.get(key)
+        if old is None or old[:cmp_len] != tuple(row)[:cmp_len]:
+            changed.append(row)
+    stale = [k for k in existing if k not in incoming]
+    if stale:
+        c.executemany('DELETE FROM %s WHERE id=?' % table, [(k,) for k in stale])
+    if changed:
+        ph = ','.join(['?'] * len(cols))
+        c.executemany('INSERT OR REPLACE INTO %s (%s) VALUES (%s)'
+                      % (table, ','.join(cols), ph), changed)
+    return len(changed), len(stale)
+
+
 def mart_sync(conn, state_obj):
-    """把前端传上来的完整 state 对象同步到 mart 表（幂等，用 INSERT OR REPLACE）。"""
+    """把前端传上来的完整 state 对象增量同步到 mart 表，返回各表 (写入, 删除) 统计。"""
     now = _now_iso()
     c = conn.cursor()
+    stats = {}
     # 1) tickets
     tickets = state_obj.get('tickets') if isinstance(state_obj, dict) else None
     if isinstance(tickets, list):
-        c.execute('DELETE FROM tickets_mart')
         rows = []
         for t in tickets:
             rows.append((
@@ -427,14 +517,10 @@ def mart_sync(conn, state_obj):
                 t.get('satisfaction') or None, t.get('parts', ''), t.get('helpers', ''), t.get('remark', ''),
                 now,
             ))
-        if rows:
-            c.executemany(
-                'INSERT OR REPLACE INTO tickets_mart VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                rows)
+        stats['tickets'] = _sync_mart_table(c, 'tickets_mart', TICKETS_MART_COLS, rows)
     # 2) patrols
     patrols = state_obj.get('patrols') if isinstance(state_obj, dict) else None
     if isinstance(patrols, list):
-        c.execute('DELETE FROM patrols_mart')
         rows = []
         for p in patrols:
             fc, tc = _count_results(p.get('results'))
@@ -445,15 +531,11 @@ def mart_sync(conn, state_obj):
                 fc, tc, json.dumps(p.get('results') or {}, ensure_ascii=False),
                 now,
             ))
-        if rows:
-            c.executemany(
-                'INSERT OR REPLACE INTO patrols_mart VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                rows)
+        stats['patrols'] = _sync_mart_table(c, 'patrols_mart', PATROLS_MART_COLS, rows)
     # 3) devices
     assets = state_obj.get('assets') if isinstance(state_obj, dict) else None
     devices = assets.get('devices') if isinstance(assets, dict) else None
     if isinstance(devices, list):
-        c.execute('DELETE FROM devices_mart')
         rows = []
         for d in devices:
             rows.append((
@@ -461,13 +543,11 @@ def mart_sync(conn, state_obj):
                 d.get('room', ''), d.get('building', ''), d.get('boughtAt', ''), d.get('warrantyTo', ''),
                 d.get('repairCount') or 0, d.get('status', ''), d.get('note', ''), d.get('createdAt', ''), now,
             ))
-        if rows:
-            c.executemany(
-                'INSERT OR REPLACE INTO devices_mart VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                rows)
+        stats['devices'] = _sync_mart_table(c, 'devices_mart', DEVICES_MART_COLS, rows)
     # 记录 mart 最后一次同步时间，便于诊断
     c.execute('INSERT OR REPLACE INTO state_meta VALUES (?,?,?)', ('mart_synced_at', now, now))
     # 事务由调用方统一提交：state JSON 与 mart 表必须同成同败
+    return stats
 
 
 def mart_backfill():
@@ -491,14 +571,15 @@ def mart_backfill():
         s_p = len(obj.get('patrols', []) or []) if isinstance(obj, dict) else 0
         s_d = len((obj.get('assets') or {}).get('devices', []) or []) if isinstance(obj, dict) else 0
         if (s_t > 0 and t_count == 0) or (s_p > 0 and p_count == 0) or (s_d > 0 and d_count == 0):
-            mart_sync(conn, obj)
+            stats = mart_sync(conn, obj)
             conn.commit()
             conn.close()
+            log.info('mart 回填完成：%s', stats)
             return True
         conn.close()
         return False
     except Exception as e:
-        print('mart_backfill warn:', e)
+        log.warning('mart 回填失败：%s', e)
         return False
 
 
@@ -845,7 +926,9 @@ def api_license_post(user):
     ok, res = license_key.import_license(_LIC_DIR, text)
     _lic_cache['st'] = None
     if not ok:
+        log.warning('导入授权失败：%s', res)
         return jsonify({'error': res}), 400
+    log.info('导入授权成功')
     return jsonify({'ok': True, 'license': res})
 
 
@@ -1441,6 +1524,7 @@ def put_state(user):
                 return jsonify({'error': '数据已被其他客户端更新，请刷新后重试',
                                 'conflict': True, 'rev': cur_rev, 'state': latest_obj}), 409
         new_rev = cur_rev + 1
+        t_start = time.time()
         conn.execute('INSERT INTO state (id, json, updated_at, rev) VALUES (1, ?, ?, ?) '
                      'ON CONFLICT(id) DO UPDATE SET json = excluded.json, '
                      'updated_at = excluded.updated_at, rev = excluded.rev',
@@ -1448,13 +1532,15 @@ def put_state(user):
         # state JSON 与 mart 表在同一事务中提交：任一步失败就整体回滚，
         # 不能出现「接口返回成功、数据实际没保存」的静默丢数据。
         try:
-            mart_sync(conn, obj)
+            stats = mart_sync(conn, obj)
             conn.commit()
         except Exception as e:
             conn.rollback()
-            import sys as _sys
-            print('mart_sync fail:', e, file=_sys.stderr)
+            log.exception('保存失败 rev=%d：%s', new_rev, e)
             return jsonify({'error': '保存失败：数据仓库同步未完成，本次修改未生效，请重试'}), 500
+        log.info('保存成功 rev=%d 用时=%dms mart=%s', new_rev,
+                 int((time.time() - t_start) * 1000),
+                 ' '.join('%s(%d改/%d删)' % (k, v[0], v[1]) for k, v in sorted(stats.items())))
     finally:
         conn.close()
     return jsonify({'ok': True, 'rev': new_rev})
@@ -1552,9 +1638,10 @@ def audit_write(user, category, action, target='', detail=''):
 
 def _write_backup(dest_path):
     """用 SQLite 在线备份 API 生成一致性快照（备份期间不阻塞读写）。"""
-    src = sqlite3.connect(DB)
+    src = sqlite3.connect(DB, timeout=10)
     try:
-        dst = sqlite3.connect(dest_path)
+        src.execute('PRAGMA busy_timeout=10000')
+        dst = sqlite3.connect(dest_path, timeout=10)
         try:
             src.backup(dst)
         finally:
@@ -1599,6 +1686,7 @@ def create_backup(_admin):
     try:
         _write_backup(fpath)
     except Exception as e:
+        log.exception('创建备份失败：%s', e)
         return jsonify({'error': '备份失败：%s' % e}), 500
     # 滚动清理：手动备份只保留最近 MAX_BACKUPS 份（恢复前自动备份 pre_restore_* 不清理）
     manuals = [f for f in _backup_files() if not f['auto']]
@@ -1615,6 +1703,7 @@ def create_backup(_admin):
     resp.headers['X-Backup-Path'] = quote(fpath)
     resp.headers['Access-Control-Expose-Headers'] = 'X-Backup-Name, X-Backup-Path'
     audit_write(_admin, '数据', '创建数据库备份', fname, '生成数据库完整快照，可用于故障恢复')
+    log.info('创建备份成功 file=%s size=%d', fname, len(body))
     return resp
 
 
@@ -1650,16 +1739,32 @@ def restore_backup(_admin):
         _write_backup(safety)
     except Exception:
         pass
+    # 用 SQLite 在线备份 API 覆盖当前库（而不是直接替换文件）：
+    # WAL 模式下直接 os.replace 会遗留旧库的 -wal/-shm，导致恢复后数据错乱。
     try:
-        os.replace(tmp, DB)
-    except OSError as e:
+        src = sqlite3.connect(tmp)
+        try:
+            dst = sqlite3.connect(DB, timeout=10)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except Exception as e:
+        log.exception('恢复数据库失败：%s', e)
         try:
             os.remove(tmp)
         except OSError:
             pass
-        return jsonify({'error': '替换数据库失败：%s' % e}), 500
+        return jsonify({'error': '恢复数据库失败：%s' % e}), 500
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
     init_db()  # 兼容旧版本备份：补齐缺失的表 / 列
     audit_write(_admin, '数据', '恢复数据库备份', str(f.filename or ''), '从备份文件恢复数据库；恢复前已自动备份当前数据为「' + os.path.basename(safety) + '」')
+    log.warning('恢复数据库完成 file=%s safety=%s', f.filename, os.path.basename(safety))
     return jsonify({'ok': True, 'safety': safety,
                     'message': '恢复完成。当前所有登录会话已失效，请使用备份中的账号重新登录。'})
 
@@ -2527,9 +2632,11 @@ def report_device_summary(_user):
 @require_perm('reports')
 def report_device_warranty(_user):
     """保修预警列表（按到期时间升序）。"""
-    limit = int(request.args.get('limit') or 50)
-    limit = min(200, max(1, limit))
-    days = int(request.args.get('days') or 90)
+    try:
+        limit = min(200, max(1, int(request.args.get('limit') or 50)))
+        days = min(3650, max(1, int(request.args.get('days') or 90)))
+    except (TypeError, ValueError):
+        return jsonify({'error': '参数 limit / days 必须是 1-3650 之间的整数'}), 400
     conn = get_db()
     rows = conn.execute(
         "SELECT id, name, category, brand, sn, room, building, warranty_to, status "
@@ -2692,12 +2799,18 @@ if __name__ == '__main__':
         conn.commit()
         conn.close()
         path = _write_initial_password(new_pwd)
+        log.warning('已通过 --reset-admin 重置管理员密码')
         print('[reset-admin] 管理员密码已重置，新初始密码：%s' % path)
         sys.exit(0)
     # 启动时把 state JSON blob 里的存量数据回填到 mart 表（幂等）
     backfilled = mart_backfill()
     if backfilled:
         print('[mart] 已从 state JSON 回填数据仓库表')
+    _lic = license_status()
+    log.info('服务启动 v%s host=%s port=%d db=%s', VERSION, HOST, PORT, DB)
+    log.info('运行日志：%s', LOG_PATH)
+    log.info('授权状态：%s 版本=%s 到期=%s 剩余=%s 天',
+             _lic.get('state'), _lic.get('edition'), _lic.get('expires'), _lic.get('days_left'))
     print('东华大学多媒体教室运维系统 · 监听 %s:%d' % (HOST, PORT))
     print('本机访问：http://127.0.0.1:%d' % PORT)
     if HOST == '0.0.0.0':
