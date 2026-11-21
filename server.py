@@ -1745,6 +1745,12 @@ def create_user(_admin):
     if display_name not in _engineer_names():
         return jsonify({'error': '用户名必须是「基础配置 · 工程师名单」中的姓名，请先添加该工程师'}), 400
     conn = get_db()
+    lic_max = int(license_status().get('max_users') or 0)
+    if lic_max > 0:
+        used = conn.execute('SELECT COUNT(*) FROM users WHERE active=1').fetchone()[0]
+        if int(used or 0) >= lic_max:
+            conn.close()
+            return jsonify({'error': '当前授权最多支持 %d 个启用账号，已达到上限；请停用不用的账号或升级授权' % lic_max}), 403
     if conn.execute('SELECT 1 FROM users WHERE name=?', (name,)).fetchone():
         conn.close()
         return jsonify({'error': '登录名已存在'}), 400
@@ -1769,6 +1775,13 @@ def update_user(_admin, name):
     if not row:
         conn.close()
         return jsonify({'error': '用户不存在'}), 404
+    if data.get('active') and not row['active']:
+        lic_max = int(license_status().get('max_users') or 0)
+        if lic_max > 0:
+            used = conn.execute('SELECT COUNT(*) FROM users WHERE active=1').fetchone()[0]
+            if int(used or 0) >= lic_max:
+                conn.close()
+                return jsonify({'error': '当前授权最多支持 %d 个启用账号，已达到上限；请先停用其他账号或升级授权' % lic_max}), 403
     fields = []
     values = []
     if 'role' in data:

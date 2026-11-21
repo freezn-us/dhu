@@ -2,7 +2,7 @@
 
 面向东华大学松江校区多媒体教室的运维管理平台：报修受理、工作日志填报、巡视打卡、教室/设备档案、统计报表。
 
-- **当前版本**：v1.5.2（2026-11-17：保存事务/巡视统计修复，随机初始口令与强制改密，默认仅本机监听；见 [version.json](version.json)；上一版 v1.5.1）
+- **当前版本**：v1.5.4（2026-11-21：新增排课查询、通用授权、教室筛选与 PyMuPDF 瘦身；见 [version.json](version.json)；上一版 v1.5.3）
 - **架构**：Flask + SQLite 后端（`server.py`）+ 原生 JS 单页前端（`assets/`），PyInstaller 打包为 Windows 安装包
 - **数据规模**：253 间教室（一教 89 / 二教 92 / 四教 32 / 化工楼 18 / 中南楼 16 / 机房 6）
 - **交付形态**：单机或局域网部署，含 RSA 授权与桌面启动器，双击图标即用
@@ -50,7 +50,7 @@ python server.py
 | 日志填报 | 巡视管理 | 每天自动生成 3 个时段任务，逐项打卡生成巡检日志 |
 | 查询与分析 | 日志查询 | 筛选、详情、编辑、导出 |
 | 查询与分析 | 统计报表 | 区间统计、故障 TOP、楼栋/教室分布、工作量、时效与满意度 |
-| 查询与分析 | 排课查询 | 上传一教/二教《值班记录表》PDF（可多选或 ZIP），月历 + 单日教室×13 时段占用（课/借/考），表头按上午/下午/晚上三段分组；日历顶部汇总可用教室、本月使用过（去重）、使用率、课/借/考节数与时长；管理员或具备「基础配置」权限者可上传 |
+| 查询与分析 | 排课查询 | 上传一教/二教《值班记录表》PDF（可多选或 ZIP），月历 + 单日教室×13 时段占用（课/借/考），表头按上午/下午/晚上三段分组；支持输入教室筛选当天使用情况（切换日期保留）；日历顶部汇总可用教室、本月使用过（去重）、使用率、课/借/考节数与时长；管理员或具备「基础配置」权限者可上传 |
 | 资产与知识 | 教室/设备档案 | 教室清单（含区域）、设备台账与保修预警 |
 | 资产与知识 | 知识库 | 故障速查与操作指引 |
 | 数据与配置 | 导入 / 导出 | CSV/XLSX 导入、全量 JSON 备份恢复 |
@@ -87,9 +87,12 @@ python server.py
 ## 五、授权（License）
 
 - 客户端内嵌 RSA 公钥（`license_key.py`），厂商用私钥签发，改任意字段即签名失效
-- 与机器码绑定（Windows MachineGuid + MAC + 主机名，取 16 位十六进制）
-- 无授权文件时自动生成 30 天试用；到期后 7 天宽限期**只读**，超期禁止登录
-- 有防系统时间回拨检测
+- 正式授权与机器码绑定（Windows MachineGuid + MAC + 主机名，取 16 位十六进制）
+- **通用授权**：打包时自动签发 `machine="*"` 的授权，安装器仅在数据目录没有 `license.json` 时复制；
+  到期日 = 打包日期 + 1 年，换机器、重装、清空数据都不会续期；到期后凭机器码签发正式授权覆盖
+- **用户数上限**：通用授权 `max_users=20`，创建/启用账号达到上限时返回 403
+- 打包版没有授权文件时**不再自动生成 30 天试用**，进入只读并提示导入授权；源码/测试模式仍可生成 30 天试用
+- 到期后 7 天宽限期**只读**，超期禁止登录；有防系统时间回拨检测
 - **厂商私钥不在本目录**：已移出到项目同级 `../dhu-keys/license_private.pem`，
   避免随项目打包分发而泄露。内嵌同一把私钥的 `DHU-License-Maker.exe` 一并移出。
   客户端只需公钥，运行系统不需要私钥目录。
@@ -97,8 +100,15 @@ python server.py
 签发授权：
 
 ```bash
+# 正式授权：绑定客户机器码
 python tools/make_license.py --org "东华大学" --machine A1B2-C3D4-E5F6-7890 --days 365
+# 通用授权：不绑机器，到期日固定（打包脚本会自动生成）
+python tools/make_license.py --org "东华大学" --machine "*" --expires 2027-11-21 --users 20
 ```
+
+打包前在 `release_license.json` 里确认 `org / edition / max_users`；`build_release.ps1`
+会按构建日期 +1 年签发通用授权，并作为安装程序必填资源打入。已有 `license.json`
+的升级安装不会被覆盖。
 
 > ⚠️ 不要运行 `tools/_gen_keys.py` 重新生成密钥——那会作废所有已签发授权，
 > 并需同步替换 `license_key.py` 内嵌公钥后重新发布。该脚本已加确认开关，默认拒绝执行。
@@ -152,13 +162,14 @@ python tests/ui_selftest.py          # Playwright 端到端
 python tests/test_daily_import.py    # 真实日报导入校验
 ```
 
-共 18 个测试/诊断脚本（13 个回归用例 + `ui_selftest.py` + 冒烟/诊查脚本）。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
+共 19 个测试/诊断脚本（14 个回归用例 + `ui_selftest.py` + 冒烟/诊查脚本）。`tests/_env.py` 与 `ui_selftest.py` 已改为**相对项目根动态解析路径**，换目录无需修改。
 
 - 原硬编码旧路径 `d:\pctools win10\dhu` 的 6 个脚本（`test_daily_import.py`、`test_date_clamp.py`、`test_default_room.py`、`test_export_format.py`、`test_march_import.py`、`test_topbar_cal.py`）已全部改为基于 `__file__` 动态解析；旧机器临时 `pylibs` 搜索路径已从全部测试脚本移除，依赖统一由 `.build-venv` 提供。
 - 其中 3 个脚本需要真实日报 xlsx 样本：`test_daily_import.py` / `test_export_format.py` 用 `DHU_TEST_XLSX`（或 `tests/fixtures/daily-log.xlsx`），`test_march_import.py` 用 `DHU_TEST_MARCH_XLSX`（或 `tests/fixtures/march-log.xlsx`）。缺样本时会给出明确提示并退出，不再抛 FileNotFoundError。
 - `tests/test_state_rev.py`：乐观锁与统一错误响应（15 项）。
 - `tests/test_state_perm.py`：服务端权限校验回归（55 项，临时库 + 临时端口，不碰正式数据）。
 - `tests/test_schedule.py`：排课表解析 + 预览/导入/覆盖/查询/删除接口回归（47 项，依赖 `D:\File\AI\class schudel` 样例；缺失时自动跳过）。
+- `tests/test_license_universal.py`：通用授权 `machine=*`、打包版不自动试用、错机器/过期拒绝、通用授权导入（13 项）。
 
 ## 十、文档
 
@@ -180,6 +191,6 @@ python tests/test_daily_import.py    # 真实日报导入校验
 - 打印样式仅隐藏导航与操作区，未做分页优化
 - 权限点为**页面级**：`/api/state` GET 仍返回全量业务数据；报表类 GET 接口已按 `reports` 权限校验，但工作台依赖的摘要数据仍随 `/api/state` 下发
 - 排课表目前只覆盖一教、二教（160 行：156 间普通教室 + 4 个特殊行）；四教、化工楼、中南楼、机房无数据
-- 排课表只解析「课 / 借」占用状态，不含课程名、教师、借用人；每天需上传一个 PDF，不提供自动抓取
-- 排课表上传依赖 PyMuPDF，安装包体积会增加约 20MB
+- 排课表只解析「课 / 借 / 考」占用状态，不含课程名、教师、借用人；每天需上传一个 PDF，不提供自动抓取
+- 排课表上传依赖 PyMuPDF；已用自定义 PyInstaller hook 排除 `layout/ONNX` 模型与 `mupdf-devel`，服务端约增加 14MB（未压缩前整包会多约 50MB）
 - 已建立 git 基线（`main` 分支，忽略规则见 `.gitignore`）；`backups/` 手工快照仍留在磁盘但不纳入版本控制。代码级回滚优先用 `git`，已安装版本的回滚仍用安装目录下「版本回滚.bat」

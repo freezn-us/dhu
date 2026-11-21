@@ -55,6 +55,21 @@ $Copyright = '© 2026 东华大学信息中心 版权所有'
 $PyExe = Join-Path $Root '.build-venv\Scripts\python.exe'
 if (-not (Test-Path $PyExe)) { $PyExe = 'python' }
 
+# ---------- 1.5 生成通用授权（打包日 +1 年，换机/重装不会续期） ----------
+$LicCfgPath = Join-Path $Root 'release_license.json'
+if (-not (Test-Path $LicCfgPath)) { throw '缺少 release_license.json，已中止打包' }
+$LicCfg = Get-Content $LicCfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $LicCfg.org -or -not $LicCfg.edition -or -not $LicCfg.max_users) {
+    throw 'release_license.json 必须包含 org / edition / max_users'
+}
+$LicExpires = (Get-Date).AddYears(1).ToString('yyyy-MM-dd')
+$LicOut = Join-Path $Root 'build\license\license.json'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LicOut) | Out-Null
+& $PyExe (Join-Path $Root 'tools\make_license.py') --org $LicCfg.org --machine '*' `
+    --expires $LicExpires --users ([int]$LicCfg.max_users) --edition $LicCfg.edition --out $LicOut
+if ($LASTEXITCODE -ne 0) { throw '通用授权签发失败' }
+Write-Host ("  通用授权：{0} / {1} / {2} 用户 / 到期 {3}" -f $LicCfg.org, $LicCfg.edition, $LicCfg.max_users, $LicExpires) -ForegroundColor Cyan
+
 Write-Host '============================================'
 Write-Host ("  构建版本 v" + $newVersion) -ForegroundColor Cyan
 Write-Host '============================================'
@@ -90,27 +105,33 @@ Write-Host '[2/5] 打包服务端 dhu-ops-server.exe ...'
 Push-Location $Root
 try {
     Remove-Item (Join-Path $Dist 'dhu-ops-server.spec') -ErrorAction SilentlyContinue
+    $ErrorActionPreference = 'Continue'
     & $PyExe -m PyInstaller --noconfirm --clean --onefile --noconsole --name dhu-ops-server `
         --icon $Icon `
         --version-file (Join-Path $VerResDir 'server.txt') `
         --distpath $Dist --workpath (Join-Path $env:TEMP 'dhu_build_server') --specpath $Dist `
+        --additional-hooks-dir "$Root\tools\pyi_hooks" `
         --add-data "$Root\index.html;." --add-data "$FrontDir;assets" --add-data "$Root\vendor;vendor" `
         --exclude-module numpy --exclude-module scipy --exclude-module pandas --exclude-module matplotlib `
         --exclude-module tkinter --exclude-module IPython --exclude-module pytest `
-        "$Root\server.py"
+        "$Root\server.py" 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0) { throw '服务端打包失败' }
 
     Write-Host '[3/5] 打包桌面启动器 DHU-Ops-Launcher.exe ...'
     Remove-Item (Join-Path $Dist 'DHU-Ops-Launcher.spec') -ErrorAction SilentlyContinue
+    $ErrorActionPreference = 'Continue'
     & $PyExe -m PyInstaller --noconfirm --clean --onefile --noconsole --name DHU-Ops-Launcher `
         --icon $Icon `
         --version-file (Join-Path $VerResDir 'launcher.txt') `
         --distpath $Dist --workpath (Join-Path $env:TEMP 'dhu_build_launcher') --specpath $Dist `
-        "$Root\launcher.py"
+        "$Root\launcher.py" 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0) { throw '启动器打包失败' }
 
     Write-Host '[4/5] 打包安装程序 DHU-Ops-Setup.exe ...'
     Remove-Item (Join-Path $Dist 'DHU-Ops-Setup.spec') -ErrorAction SilentlyContinue
+    $ErrorActionPreference = 'Continue'
     & $PyExe -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name DHU-Ops-Setup `
         --icon $Icon `
         --version-file (Join-Path $VerResDir 'setup.txt') `
@@ -120,8 +141,10 @@ try {
         --add-binary "$Dist\dhu-ops-server.exe;." `
         --add-binary "$Dist\DHU-Ops-Launcher.exe;." `
         --add-data "$Icon;." `
+        --add-data "$LicOut;." `
         --add-data "$Root\version.json;." --add-data "$Root\rollback.ps1;." `
-        "$Root\installer_gui.py"
+        "$Root\installer_gui.py" 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0) { throw '安装程序打包失败' }
 } finally {
     Pop-Location
@@ -134,6 +157,8 @@ foreach ($f in @('dhu-ops-server.exe', 'DHU-Ops-Launcher.exe', 'DHU-Ops-Setup.ex
     Copy-Item (Join-Path $Dist $f) (Join-Path $relDir $f) -Force
 }
 Copy-Item $vf (Join-Path $relDir 'version.json') -Force
+Copy-Item $LicOut (Join-Path $relDir 'license.json') -Force
+Copy-Item (Join-Path $Root 'release_license.json') (Join-Path $relDir 'release_license.json') -Force
 Copy-Item (Join-Path $Root 'rollback.ps1') (Join-Path $relDir 'rollback.ps1') -Force
 Copy-Item (Join-Path $Root 'build\assets-manifest.json') (Join-Path $relDir 'assets-manifest.json') -Force
 
@@ -152,6 +177,7 @@ foreach ($f in @('dhu-ops-server.exe', 'DHU-Ops-Launcher.exe', 'DHU-Ops-Setup.ex
     Copy-Item (Join-Path $Dist $f) (Join-Path $base $f) -Force
 }
 Copy-Item $vf (Join-Path $base 'version.json') -Force
+Copy-Item $LicOut (Join-Path $base 'license.json') -Force
 Copy-Item (Join-Path $Root 'rollback.ps1') (Join-Path $base 'rollback.ps1') -Force
 
 $bat = @'

@@ -47,11 +47,22 @@ def _read_build_info():
         return '0.0.0', '', ''
 
 
+def _read_license_info():
+    """读取随包通用授权信息，用于安装完成提示（不参与校验）。"""
+    try:
+        with open(_bundled_file(LICENSE_NAME), 'r', encoding='utf-8') as f:
+            d = json.load(f)
+        return d
+    except Exception:
+        return {}
+
+
 APP_VERSION, BUILD_TIME, BUILD_NOTES = _read_build_info()
 TASK_NAME = 'DHU-Ops-Server'
 EXE_NAME = 'dhu-ops-server.exe'
 LAUNCHER_NAME = 'DHU-Ops-Launcher.exe'
 ICON_NAME = 'dhu-ops.ico'
+LICENSE_NAME = 'license.json'
 SHORTCUT_NAME = APP_TITLE
 DEFAULT_DIR = r'C:\dhu-ops'
 DEFAULT_PORT = 8420
@@ -332,6 +343,16 @@ def install(target, port, allow_lan=False, log=print):
     with open(os.path.join(target, 'access.txt'), 'w', encoding='utf-8') as f:
         f.write('lan\n' if allow_lan else 'local\n')
     os.makedirs(DATA_DIR, exist_ok=True)
+    # 首次安装复制随包通用授权；已有授权（试用/正式）一律不覆盖，避免升级时改掉客户授权
+    lic_src = _bundled_file(LICENSE_NAME)
+    lic_dst = os.path.join(DATA_DIR, LICENSE_NAME)
+    if os.path.exists(lic_dst):
+        log('检测到已有授权文件，保留不覆盖：%s' % lic_dst)
+    elif os.path.exists(lic_src):
+        shutil.copy2(lic_src, lic_dst)
+        log('已安装通用授权：%s（换机/重装不会续期，到期后凭机器码签发正式授权）' % lic_dst)
+    else:
+        log('[提醒] 安装包内未找到通用授权，首次启动将进入无授权只读状态')
     # 授权本机用户读写数据目录：计划任务未运行时，启动器可直接拉起服务端
     run(['icacls', DATA_DIR, '/grant', '*S-1-5-32-545:(OI)(CI)M'])
 
@@ -621,6 +642,11 @@ def main():
                     msg += '\n（已放行专用网络与本地子网）'
                 else:
                     msg += '\n当前仅本机可访问；如需同事访问，请重新安装并勾选「允许局域网访问」。'
+                lic = _read_license_info()
+                if lic.get('expires'):
+                    msg += ('\n\n通用授权：%s / %s / %s 用户\n到期：%s（换机或重装不会续期）'
+                            % (lic.get('org') or '东华大学', lic.get('edition') or '标准版',
+                               lic.get('max_users') or 20, lic.get('expires')))
                 msg += ('\n\n初始管理员密码（一次性）：\n%s\n首次登录必须修改密码，修改成功后该文件自动删除。'
                         % os.path.join(DATA_DIR, '初始管理员密码.txt'))
                 msg += '\n数据库：%s' % os.path.join(DATA_DIR, 'dhu_ops.db')

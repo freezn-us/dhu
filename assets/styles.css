@@ -1001,6 +1001,15 @@ tbody tr:last-child td{border-bottom:none}
 .sc-seg-btn.on{background:#e8f1ff;color:#1677ff;font-weight:600}
 .sc-check{font-size:12px;color:var(--sub);display:inline-flex;align-items:center;gap:5px}
 .sc-toolbar-hint{font-size:11px;color:var(--faint);margin-left:auto}
+.sc-roombar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 2px}
+.sc-roombar>label{font-size:12px;color:var(--sub)}
+.sc-room-input{width:220px;height:30px;padding:3px 9px;font-size:12px}
+.sc-room-clear{padding:3px 8px;font-size:11px}
+.sc-room-sum{font-size:12px;color:var(--sub);line-height:1.5;flex:1;min-width:200px}
+.sc-room-sum b{color:var(--text)}
+.sc-room-sum .sc-room-name{font-weight:600;color:var(--text)}
+.sc-room-sum .sc-room-spans{display:block;font-size:11px;color:var(--faint);margin-top:1px}
+.sc-room-sum .err{color:#cf1322}
 .sc-scroll{max-height:calc(100vh - 300px);overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
 .sc-table{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;min-width:740px;font-size:11px}
 .sc-table th,.sc-table td{border-bottom:1px solid #eef1f6;border-right:1px solid #f1f4f9;padding:0;height:30px;text-align:center}

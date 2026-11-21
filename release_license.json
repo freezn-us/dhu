@@ -1,0 +1,6 @@
+{
+  "org": "东华大学",
+  "edition": "标准版",
+  "max_users": 20,
+  "note": "打包时按构建日期 +1 年生成通用授权（machine=*），安装器仅在数据目录无 license.json 时复制"
+}

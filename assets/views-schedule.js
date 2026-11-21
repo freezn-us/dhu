@@ -4,7 +4,8 @@
   var U = window.UI, S = window.Store;
   var st = {
     year: 0, month: 0, selected: '', days: {}, day: null, monthTotals: null,
-    filter: 'all', hideEmpty: false, loading: false, preview: null
+    filter: 'all', hideEmpty: false, loading: false, preview: null,
+    roomQuery: ''
   };
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -61,6 +62,41 @@
   function periodOfSlot(s) {
     var h = parseInt(String((s && s.start) || '').split(':')[0], 10);
     return h < 12 ? 'am' : (h < 18 ? 'pm' : 'ev');
+  }
+
+  // 教室搜索：支持“松1101”“1101”“1教1101”等写法，忽略空格与大小写。
+  function roomNeedle(q) {
+    var s = String(q || '').replace(/\s+/g, '').toLowerCase();
+    s = s.replace(/^一教/, '松1').replace(/^二教/, '松2');
+    s = s.replace(/^1教/, '松1').replace(/^2教/, '松2');
+    return s;
+  }
+  function roomMatch(r, q) {
+    var s = roomNeedle(q);
+    if (!s) return true;
+    var name = String(r.name || '').toLowerCase();
+    return name.indexOf(s) >= 0 || String(r.digits || '').indexOf(s) >= 0;
+  }
+  function roomMatches(d) {
+    var s = roomNeedle(st.roomQuery);
+    if (!s) return [];
+    return d.rooms.filter(function (r) { return roomMatch(r, st.roomQuery); });
+  }
+  function roomSummary(r, d) {
+    var cnt = { class: 0, borrow: 0, exam: 0 }, mins = 0, spans = [], i = 0, n = r.slots.length;
+    while (i < n) {
+      var v = r.slots[i], j = i;
+      while (j + 1 < n && r.slots[j + 1] === v) j++;
+      if (v) {
+        var m = 0;
+        for (var k = i; k <= j; k++) m += (d.slots[k] && d.slots[k].minutes) || 45;
+        cnt[v] = (cnt[v] || 0) + (j - i + 1);
+        mins += m;
+        spans.push(d.slots[i].start + '–' + d.slots[j].end + ' ' + (TYPE[v] ? TYPE[v][0] : v));
+      }
+      i = j + 1;
+    }
+    return { cnt: cnt, mins: mins, spans: spans };
   }
 
   function render() {
@@ -249,6 +285,7 @@
 
   function filteredRooms(d) {
     return d.rooms.filter(function (r) {
+      if (!roomMatch(r, st.roomQuery)) return false;
       if (st.filter !== 'all' && r.building !== st.filter) return false;
       if (st.hideEmpty && !r.slots.some(function (x) { return x; })) return false;
       return true;
@@ -290,11 +327,33 @@
     var toolbar = '<div class="sc-toolbar"><div class="sc-seg" id="sc-filter">' + filters + '</div>' +
       '<label class="sc-check"><input type="checkbox" id="sc-hide-empty"' + (st.hideEmpty ? ' checked' : '') + '> 只看有占用</label>' +
       '<span class="sc-toolbar-hint" id="sc-count"></span></div>';
+    var opts = d.rooms.map(function (r) {
+      return '<option value="' + S.esc(r.name) + '">' + S.esc(r.name) + (r.capacity ? ' · ' + r.capacity + ' 座' : '') + '</option>';
+    }).join('');
+    var roomBar = '<div class="sc-roombar">' +
+      '<label for="sc-room-q">教室</label>' +
+      '<input id="sc-room-q" class="input sc-room-input" list="sc-room-list" autocomplete="off" ' +
+      'placeholder="输入教室，如 松1101 / 1101" value="' + S.esc(st.roomQuery) + '">' +
+      '<datalist id="sc-room-list">' + opts + '</datalist>' +
+      '<button class="btn btn-ghost sc-room-clear" id="sc-room-clear"' + (st.roomQuery ? '' : ' style="display:none"') + '>清除</button>' +
+      '<div class="sc-room-sum" id="sc-room-sum"></div></div>';
 
-    box.innerHTML = head + toolbar + '<div id="sc-table-wrap"></div>';
+    box.innerHTML = head + roomBar + toolbar + '<div id="sc-table-wrap"></div>';
     document.getElementById('sc-dl').onclick = function () { downloadSource(d.date); };
     var del = document.getElementById('sc-del');
     if (del) del.onclick = function () { deleteDay(d.date); };
+    var rq = document.getElementById('sc-room-q');
+    var onRoom = function () {
+      st.roomQuery = rq.value;
+      document.getElementById('sc-room-clear').style.display = st.roomQuery ? '' : 'none';
+      renderDayTable();
+    };
+    rq.addEventListener('input', onRoom);
+    rq.addEventListener('search', onRoom);
+    rq.addEventListener('change', onRoom);
+    document.getElementById('sc-room-clear').onclick = function () {
+      st.roomQuery = ''; rq.value = ''; rq.focus(); onRoom();
+    };
     document.getElementById('sc-filter').onclick = function (e) {
       var b = e.target.closest('[data-f]');
       if (!b) return;
@@ -318,8 +377,11 @@
     var wrap = document.getElementById('sc-table-wrap');
     var cnt = document.getElementById('sc-count');
     if (cnt) cnt.textContent = '显示 ' + rooms.length + ' / ' + d.rooms.length + ' 行';
+    updateRoomSummary(d);
     if (!rooms.length) {
-      wrap.innerHTML = '<div class="empty">当前筛选下没有教室</div>';
+      wrap.innerHTML = '<div class="empty">' +
+        (roomNeedle(st.roomQuery) ? '没有匹配「' + S.esc(st.roomQuery) + '」的教室' : '当前筛选下没有教室') +
+        '</div>';
       return;
     }
     var pidx = d.slots.map(periodOfSlot);
@@ -366,6 +428,31 @@
       '<div class="hint" style="margin-top:8px">表格中「课 / 借 / 考」仅表示该时段有占用，不含课程名、教师与借用人信息；连续节次已合并显示。</div>';
   }
 
+  function updateRoomSummary(d) {
+    var el = document.getElementById('sc-room-sum');
+    if (!el) return;
+    if (!roomNeedle(st.roomQuery)) { el.innerHTML = ''; return; }
+    var ms = roomMatches(d);
+    if (!ms.length) {
+      el.innerHTML = '<span class="err">未找到匹配「' + S.esc(st.roomQuery) + '」的教室</span>';
+      return;
+    }
+    if (ms.length > 1) {
+      el.innerHTML = '匹配 <b>' + ms.length + '</b> 间教室，请继续输入精确名称';
+      return;
+    }
+    var r = ms[0], q = roomSummary(r, d);
+    var parts = [];
+    if (q.cnt['class']) parts.push('课 ' + q.cnt['class'] + ' 节');
+    if (q.cnt.borrow) parts.push('借 ' + q.cnt.borrow + ' 节');
+    if (q.cnt.exam) parts.push('考 ' + q.cnt.exam + ' 节');
+    var usage = q.mins
+      ? '<b>' + fmtDur(q.mins) + '</b>' + (parts.length ? ' · ' + parts.join(' · ') : '')
+      : '<b>当天无使用</b>';
+    el.innerHTML = '<span class="sc-room-name">' + S.esc(r.name) + '</span> · ' + usage +
+      (q.spans.length ? '<span class="sc-room-spans">' + S.esc(q.spans.join('、')) + '</span>' : '');
+  }
+
   function dayClick(e) {
     var td = e.target.closest('td[data-room]');
     if (!td || !st.day) return;
@@ -381,7 +468,7 @@
       '  <div class="sc-detail-row"><span>日期</span><b>' + S.esc(d.date) + ' · ' + S.esc(d.weekday) + '</b></div>' +
       '  <div class="sc-detail-row"><span>时段</span><b>' + slotText(d, from, to) + '</b></div>' +
       '  <div class="sc-detail-row"><span>时长</span><b>' + durText(mins) + '（' + (to - from + 1) + ' 节）</b></div>' +
-      '  <div class="sc-detail-row"><span>类型</span><b>' + (type === 'class' ? '上课' : '借用') + '</b></div>' +
+      '  <div class="sc-detail-row"><span>类型</span><b>' + (type === 'class' ? '上课' : (type === 'exam' ? '考试' : '借用')) + '</b></div>' +
       '  <div class="sc-detail-row"><span>教室</span><b>' + S.esc(room.name) + ' · ' + S.esc(meta) + '</b></div>' +
       '</div>' +
       '<div class="hint" style="margin-top:12px">数据来自当天的《值班记录表》，只记录占用状态，不包含课程、教师或借用人。</div>',

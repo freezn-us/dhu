@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import platform
+import sys
 import uuid
 import datetime
 
@@ -175,15 +176,42 @@ def _read_file(base_dir):
         return None
 
 
-def load_status(base_dir):
-    """读取并校验授权，返回状态字典（同时做防改时间的最后运行时间记录）。"""
+def _blank_status():
+    return {
+        'state': 'invalid',
+        'org': '',
+        'edition': '',
+        'issued': '',
+        'expires': '',
+        'max_users': 0,
+        'modules': [],
+        'trial': False,
+        'machine': machine_code(),
+        'days_left': 0,
+        'reason': '',
+    }
+
+
+def load_status(base_dir, allow_trial=None):
+    """读取并校验授权，返回状态字典（同时做防改时间的最后运行时间记录）。
+
+    allow_trial=False 时不会自动生成试用授权（打包版默认如此，避免删除
+    license.json 后重新获得 30 天）；源码运行/测试仍可显式打开。
+    """
     base_dir = _dir(base_dir)
     rec = _read_file(base_dir)
     if not rec:
+        if allow_trial is None:
+            allow_trial = (not getattr(sys, 'frozen', False)
+                            and os.environ.get('DHU_OPS_ALLOW_TRIAL', '1') != '0')
+        if not allow_trial:
+            status = _blank_status()
+            status['reason'] = '未找到授权文件，请导入正式授权或使用带通用授权的安装包'
+            return status
         rec = _make_trial(base_dir)
 
-    status = {
-        'state': 'invalid',
+    status = _blank_status()
+    status.update({
         'org': rec.get('org') or '',
         'edition': rec.get('edition') or '',
         'issued': rec.get('issued') or '',
@@ -191,10 +219,7 @@ def load_status(base_dir):
         'max_users': rec.get('max_users') or 0,
         'modules': rec.get('modules') or [],
         'trial': bool(rec.get('trial')),
-        'machine': machine_code(),
-        'days_left': 0,
-        'reason': '',
-    }
+    })
 
     payload = {k: v for k, v in rec.items() if k != 'sig'}
     sig = rec.get('sig') or ''
@@ -204,7 +229,9 @@ def load_status(base_dir):
         status['reason'] = '授权文件签名校验失败，请联系厂商重新签发'
         return status
 
-    if (payload.get('machine') or '') != status['machine']:
+    lic_machine = (payload.get('machine') or '').strip()
+    # "*" 表示通用授权：不绑定机器，但到期日固定，换机/重装都不会续期。
+    if lic_machine and lic_machine != '*' and lic_machine != status['machine']:
         status['state'] = 'invalid'
         status['reason'] = '授权文件与本机机器码不匹配，请提供机器码重新签发'
         return status
@@ -260,7 +287,8 @@ def import_license(base_dir, text):
         return False, '试用授权不需要手工导入'
     if not _verify_rsa(payload, rec.get('sig') or ''):
         return False, '签名校验失败：这不是本系统签发的授权文件'
-    if (payload.get('machine') or '') != machine_code():
+    lic_machine = (payload.get('machine') or '').strip()
+    if lic_machine != '*' and lic_machine != machine_code():
         return False, '机器码不匹配：授权文件绑定的机器码是 %s，本机是 %s' % (payload.get('machine'), machine_code())
     exp = _parse_date(payload.get('expires') or '')
     if not exp or exp < _today():
